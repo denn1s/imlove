@@ -17,6 +17,7 @@ local files = {
   "test_widgets_v11",
   "test_ids",
   "test_windows",
+  "test_windows_v12",
   "test_capture",
 }
 

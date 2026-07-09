@@ -37,6 +37,13 @@ function H.click(x, y, ui)
   H.frame(ui)
 end
 
+-- A wheel event at the current mouse position, applied on the next frame —
+-- mirrors H.click's event-then-frame interleaving.
+function H.wheel(dx, dy, ui)
+  H.im.wheelmoved(dx, dy)
+  H.frame(ui)
+end
+
 -- Capture the last widget's rectangle into r as x1/y1/x2/y2.
 -- Call right after the widget, inside the UI function.
 function H.grabRect(r, im)

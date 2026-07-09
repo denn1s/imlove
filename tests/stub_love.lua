@@ -44,6 +44,7 @@ stub.font = font
 -- each test starts from a clean slate.
 function stub.install()
   local calls = stub.calls
+  stub.scissor = nil
   local function record(name)
     return function(...) calls[#calls + 1] = { name, ... } end
   end
@@ -59,6 +60,19 @@ function stub.install()
       line      = record("line"),
       circle    = record("circle"),
       print     = record("print"),
+      getScissor = function()
+        if not stub.scissor then return end -- LÖVE returns nothing, not nil
+        local s = stub.scissor
+        return s.x, s.y, s.w, s.h
+      end,
+      setScissor = function(x, y, w, h)
+        calls[#calls + 1] = { "setScissor", x, y, w, h }
+        if x == nil then
+          stub.scissor = nil
+        else
+          stub.scissor = { x = x, y = y, w = w, h = h }
+        end
+      end,
     },
     mouse = {
       getPosition = function() return stub.mouseX, stub.mouseY end,
@@ -79,6 +93,18 @@ function stub.printed()
   local out = {}
   for _, c in ipairs(stub.calls) do
     if c[1] == "print" then out[#out + 1] = tostring(c[2]) end
+  end
+  return out
+end
+
+-- Every setScissor(...) call Render() made, in order, as { x, y, w, h }
+-- (x == nil means "scissor disabled").
+function stub.scissorCalls()
+  local out = {}
+  for _, c in ipairs(stub.calls) do
+    if c[1] == "setScissor" then
+      out[#out + 1] = { c[2], c[3], c[4], c[5] }
+    end
   end
   return out
 end

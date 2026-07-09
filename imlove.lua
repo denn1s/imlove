@@ -37,7 +37,7 @@ Two classic IMGUI idioms show up throughout, worth knowing:
 MIT License — see LICENSE.
 ------------------------------------------------------------------------------]]
 
-local imlove = { _VERSION = "1.1.0" }
+local imlove = { _VERSION = "1.2.0" }
 
 -- io mirrors Dear ImGui's ImGuiIO flags. After NewFrame() these tell the host
 -- game whether the UI wants the mouse/keyboard this frame, so the game can
@@ -64,6 +64,8 @@ local style = {
   grabWidth     = 10,       -- width of a slider's grab handle
   rounding      = 3,        -- corner radius on frames and windows
   minWindowWidth = 60,
+  scrollbarWidth = 10,      -- width of a window/child's scrollbar track
+  gripSize       = 14,      -- side length of the resize-grip corner triangle
 
   colors = {
     text             = { 0.92, 0.92, 0.92, 1.00 },
@@ -100,14 +102,16 @@ local ctx = {
   windowOrder = {},    -- draw order, back-to-front (last = front-most)
   windowCount = 0,     -- used to cascade default positions of new windows
 
-  currentWindow = nil, -- window between Begin()/End(), nil outside
+  currentWindow = nil, -- window (or child) between Begin()/End(), nil outside
   hoveredWindow = nil, -- front-most window under the mouse (last-frame rects)
   nextWindowPos = nil, -- pending SetNextWindowPos(), consumed by next Begin()
+  nextWindowSize = nil, -- pending SetNextWindowSize(), consumed by next Begin()
 
   idStack   = {},      -- see PushID(); slot 1 is always the window's title
   activeId  = nil,     -- id of the widget being held with the mouse, if any
   hoveredId = nil,     -- id of the widget under the mouse this frame, if any
   dragWindow = nil,    -- window being dragged by its title bar, if any
+  resizeWindow = nil,  -- window being resized via its corner grip, if any
 
   openNodes = {},      -- TreeNode/CollapsingHeader id -> true while open
   dragAnchor = nil,    -- { id, x, value } drag origin for DragFloat/DragInt
@@ -118,6 +122,7 @@ local ctx = {
   mouse = { x = 0, y = 0, down = false, pressed = false, released = false },
   pressLatch   = false,
   releaseLatch = false,
+  wheelLatch   = 0, -- accumulated wheelmoved() dy, consumed by NewFrame()
 }
 
 --------------------------------------------------------------------------------
@@ -206,6 +211,19 @@ local function pushCircle(win, mode, x, y, r, color)
     x = x, y = y, r = r, color = color }
 end
 
+-- Push/pop a clip rectangle. Render() maintains a stack of these and
+-- intersects nested rects, so a clip pushed by a fixed-size window's content
+-- region and a BeginChild() inside it combine correctly. Widgets between a
+-- push/pop pair are what actually get scissored; see Render().
+local function pushClip(win, x, y, w, h)
+  win.drawList[#win.drawList + 1] = { kind = "clipPush", x = x, y = y,
+    w = w, h = h }
+end
+
+local function popClip(win)
+  win.drawList[#win.drawList + 1] = { kind = "clipPop" }
+end
+
 --------------------------------------------------------------------------------
 -- Windows: hit-testing and z-order
 --------------------------------------------------------------------------------
@@ -252,12 +270,26 @@ end
 --   pressed — the mouse was released over it this frame while held: a click.
 --------------------------------------------------------------------------------
 
+-- A widget is only hoverable while the mouse is within its window's current
+-- clip rect (nil = unclipped, the common case). This is what keeps a
+-- BeginChild() row that has scrolled out of view — or content of a
+-- fixed-size window scrolled past its bottom edge — from still receiving
+-- clicks meant for whatever it's hidden behind.
+local function withinClip(win, x, y)
+  local clip = win.clipRect
+  return not clip or pointIn(x, y, clip.x, clip.y, clip.w, clip.h)
+end
+
 local function behavior(win, id, x, y, w, h)
   local m = ctx.mouse
-  local hovered = ctx.hoveredWindow == win
+  -- A child window shares its root's hover/z-order: behavior() always
+  -- compares against the ROOT window, since ctx.hoveredWindow is only ever
+  -- set to root-level windows (see windowAt()).
+  local hovered = ctx.hoveredWindow == (win.root or win)
     and ctx.dragWindow == nil
     and (ctx.activeId == nil or ctx.activeId == id)
     and pointIn(m.x, m.y, x, y, w, h)
+    and withinClip(win, m.x, m.y)
 
   if hovered then ctx.hoveredId = id end
 
@@ -272,6 +304,19 @@ local function behavior(win, id, x, y, w, h)
   end
 
   return hovered, ctx.activeId == id, pressed
+end
+
+-- A widget's region can become disabled between one frame and the next while
+-- it is held — e.g. a window's flags flip to "NoResize" mid-drag, or its
+-- "open" argument stops being passed so the close button disappears. If the
+-- disabled region simply stops calling behavior(), nothing ever clears
+-- ctx.activeId, and since behavior()'s hover gate is
+-- `activeId == nil or activeId == id`, EVERY widget in EVERY window stops
+-- responding until a fully idle frame (no press/release, mouse up) happens.
+-- Disabled regions must explicitly give up any stale claim instead of
+-- silently going quiet.
+local function releaseIfActive(id)
+  if ctx.activeId == id then ctx.activeId = nil end
 end
 
 --------------------------------------------------------------------------------
@@ -316,18 +361,25 @@ end
 -- front window, only while no other widget is held.
 local function itemAddPassive(win, w, h)
   local x, y = itemAdd(win, w, h)
-  local hovered = ctx.hoveredWindow == win and ctx.dragWindow == nil
+  local hovered = ctx.hoveredWindow == (win.root or win) and ctx.dragWindow == nil
     and ctx.activeId == nil
     and pointIn(ctx.mouse.x, ctx.mouse.y, x, y, w, h)
+    and withinClip(win, ctx.mouse.x, ctx.mouse.y)
   recordItem(win, hovered, false, false)
   return x, y
 end
 
 -- Width available for widgets that stretch across the window (Selectable,
--- Separator). Uses last frame's window width — the one-frame lag again.
+-- Separator). Uses last frame's window width — the one-frame lag again —
+-- and, the same way, last frame's "did this window/child show a scrollbar"
+-- flag: when it did, the content region must stop short of the scrollbar
+-- track (reserving its full width plus the usual padding gap), or a
+-- full-width widget's own behavior() region overlaps the track and steals
+-- clicks meant for the scrollbar.
 local function availWidth(win)
   local x = win.innerX + win.indent
   local right = win.x + win.w - style.windowPadding
+  if win.hasScrollbar then right = right - style.scrollbarWidth end
   return math.max(right - x, 0)
 end
 
@@ -337,6 +389,32 @@ local function requireWindow(name)
     error("imlove." .. name .. "() called outside a Begin()/End() pair", 3)
   end
   return win
+end
+
+-- Applies a latched wheel delta to whatever is under the mouse: a
+-- BeginChild() region if the point falls inside one (the innermost —
+-- smallest-area — match wins, so a child nested inside another scrolls
+-- itself rather than its parent), the window itself otherwise. Uses last
+-- frame's rects/content sizes, same one-frame lag as hit-testing.
+local function applyWheel(win, dy)
+  if win.flags and win.flags.AlwaysAutoResize then return end -- never overflows
+  local target = win
+  if win.lastChildRects then
+    local bestArea
+    for i = 1, #win.lastChildRects do
+      local r = win.lastChildRects[i]
+      if pointIn(ctx.mouse.x, ctx.mouse.y, r.x, r.y, r.w, r.h) then
+        local area = r.w * r.h
+        if not bestArea or area < bestArea then
+          target, bestArea = win.childScroll[r.id], area
+        end
+      end
+    end
+  end
+  if not target then return end
+  local step = 3 * ctx.font:getHeight() -- ImGui scrolls ~3 lines per notch
+  local maxScroll = math.max((target.contentH or 0) - (target.visibleH or 0), 0)
+  target.scrollY = clamp((target.scrollY or 0) - dy * step, 0, maxScroll)
 end
 
 --------------------------------------------------------------------------------
@@ -360,6 +438,8 @@ function imlove.NewFrame()
   m.x, m.y = love.mouse.getPosition()
   m.pressed, ctx.pressLatch = ctx.pressLatch, false
   m.released, ctx.releaseLatch = ctx.releaseLatch, false
+  local wheelDy = ctx.wheelLatch
+  ctx.wheelLatch = 0
 
   -- Safety net: if the mouse is up and there is no release event left to
   -- deliver, nothing can legitimately still be active. This unsticks widgets
@@ -367,12 +447,16 @@ function imlove.NewFrame()
   if not m.down and not m.released and not m.pressed then
     ctx.activeId = nil
     ctx.dragWindow = nil
+    ctx.resizeWindow = nil
   end
 
   ctx.hoveredId = nil
   ctx.hoveredWindow = windowAt(m.x, m.y)
   if m.pressed and ctx.hoveredWindow then
     bringToFront(ctx.hoveredWindow)
+  end
+  if wheelDy ~= 0 and ctx.hoveredWindow then
+    applyWheel(ctx.hoveredWindow, wheelDy)
   end
 
   imlove.io.WantCaptureMouse = ctx.hoveredWindow ~= nil
@@ -394,29 +478,65 @@ function imlove.Render()
   local g = love.graphics
   local pr, pg, pb, pa = g.getColor()
   local prevFont = g.getFont()
+  local psx, psy, psw, psh = g.getScissor()
   g.setFont(ctx.font)
+
+  -- Clip stack: clipPush/clipPop commands nest, and each level is the
+  -- INTERSECTION with whatever was already scissored, so a BeginChild()
+  -- inside a scrolling window can never paint outside the window's own
+  -- content region either. Restored to the pre-Render() scissor (if any)
+  -- when the stack empties, exactly like the color/font save-restore above.
+  local clipStack = {}
+
+  local function applyTopScissor()
+    local top = clipStack[#clipStack]
+    if top then
+      g.setScissor(top.x, top.y, top.w, top.h)
+    elseif psx then
+      g.setScissor(psx, psy, psw, psh)
+    else
+      g.setScissor()
+    end
+  end
 
   for i = 1, #ctx.windowOrder do
     local win = ctx.windowOrder[i]
     if win.lastFrame == ctx.frame then
       for j = 1, #win.drawList do
         local c = win.drawList[j]
-        g.setColor(c.color)
-        if c.kind == "rect" then
-          g.rectangle(c.mode, c.x, c.y, c.w, c.h, c.rounding, c.rounding)
-        elseif c.kind == "text" then
-          g.print(c.text, c.x, c.y)
-        elseif c.kind == "triangle" then
-          g.polygon("fill", c.x1, c.y1, c.x2, c.y2, c.x3, c.y3)
-        elseif c.kind == "line" then
-          g.line(c.x1, c.y1, c.x2, c.y2)
-        elseif c.kind == "circle" then
-          g.circle(c.mode, c.x, c.y, c.r)
+        if c.kind == "clipPush" then
+          local nx, ny, nw, nh = c.x, c.y, c.w, c.h
+          local top = clipStack[#clipStack]
+          if top then
+            local x1, y1 = math.max(top.x, nx), math.max(top.y, ny)
+            local x2 = math.min(top.x + top.w, nx + nw)
+            local y2 = math.min(top.y + top.h, ny + nh)
+            nx, ny, nw, nh = x1, y1, math.max(x2 - x1, 0), math.max(y2 - y1, 0)
+          end
+          clipStack[#clipStack + 1] = { x = nx, y = ny, w = nw, h = nh }
+          applyTopScissor()
+        elseif c.kind == "clipPop" then
+          clipStack[#clipStack] = nil
+          applyTopScissor()
+        else
+          g.setColor(c.color)
+          if c.kind == "rect" then
+            g.rectangle(c.mode, c.x, c.y, c.w, c.h, c.rounding, c.rounding)
+          elseif c.kind == "text" then
+            g.print(c.text, c.x, c.y)
+          elseif c.kind == "triangle" then
+            g.polygon("fill", c.x1, c.y1, c.x2, c.y2, c.x3, c.y3)
+          elseif c.kind == "line" then
+            g.line(c.x1, c.y1, c.x2, c.y2)
+          elseif c.kind == "circle" then
+            g.circle(c.mode, c.x, c.y, c.r)
+          end
         end
       end
     end
   end
 
+  if psx then g.setScissor(psx, psy, psw, psh) else g.setScissor() end
   g.setFont(prevFont)
   g.setColor(pr, pg, pb, pa)
 end
@@ -424,6 +544,60 @@ end
 --------------------------------------------------------------------------------
 -- Windows
 --------------------------------------------------------------------------------
+
+-- Window flags, passed to Begin() as a bare string or an array of strings.
+-- Unknown flag names error immediately (typo protection) rather than being
+-- silently ignored.
+local VALID_WINDOW_FLAGS = {
+  NoTitleBar       = true, -- no drag region, no collapse arrow, no close
+                           -- button; content starts at the window's top
+  NoMove           = true, -- title bar no longer drags the window
+  NoResize         = true, -- no corner resize grip
+  NoCollapse       = true, -- no collapse arrow (title bar still drags)
+  AlwaysAutoResize = true, -- always fit content; no scrollbar, grip, or
+                           -- scrolling, ever — the v1.1 behavior
+  NoScrollbar      = true, -- scrolling by wheel still works, bar hidden
+}
+
+local function normalizeFlags(flags, fnName)
+  local set = {}
+  if flags == nil then return set end
+  if type(flags) == "string" then flags = { flags } end
+  for _, f in ipairs(flags) do
+    if not VALID_WINDOW_FLAGS[f] then
+      error("imlove." .. fnName .. "(): unknown flag '" .. tostring(f) .. "'", 3)
+    end
+    set[f] = true
+  end
+  return set
+end
+
+-- Shared track+grab for a scrolling window or BeginChild region. `state` is
+-- any table with scrollY/contentH/visibleH fields (a window IS one; a
+-- child's persistent scroll table is one too). Only called when content
+-- actually overflows. Direct click-to-position mapping, same idiom as
+-- SliderFloat/SliderInt's track (no drag-anchor, unlike DragFloat).
+local function pushScrollbar(win, id, trackX, trackY, trackW, trackH, state)
+  local sbW = style.scrollbarWidth
+  local x = trackX + trackW - sbW
+  local maxScroll = math.max(state.contentH - state.visibleH, 0)
+  local grabH = clamp(trackH * trackH / state.contentH, 20, trackH)
+  local avail = math.max(trackH - grabH, 0)
+
+  local hovered, held = behavior(win, id, x, trackY, sbW, trackH)
+  if held and avail > 0 then
+    local t = clamp((ctx.mouse.y - trackY) / avail, 0, 1)
+    state.scrollY = t * maxScroll
+  end
+  state.scrollY = clamp(state.scrollY, 0, maxScroll)
+  local grabY = trackY + (avail > 0 and (state.scrollY / maxScroll) * avail or 0)
+
+  pushRect(win, "fill", x, trackY, sbW, trackH, style.colors.frameBg, 0)
+  pushRect(win, "fill", x + 1, grabY, sbW - 2, grabH,
+    held and style.colors.sliderGrabActive
+    or hovered and style.colors.sliderGrabActive
+    or style.colors.sliderGrab, style.rounding)
+end
 
 --- Begin a window. Windows are draggable by their title bar, collapsible via
 --- the arrow in the corner, and remember position/collapsed state across
@@ -436,20 +610,48 @@ end
 ---     imlove.Text("hello")
 ---   end
 ---   imlove.End()
-function imlove.Begin(title)
+---
+--- open, if not nil, adds a close button to the title bar (mirroring
+--- ImGui's bool* p_open) and is returned back, possibly toggled to false on
+--- the frame the button is clicked — assign it back to your variable like
+--- any other imlove value:
+---
+---   visible, showStats = imlove.Begin("Stats", showStats)
+---   if visible then imlove.Text("hello") end
+---   imlove.End()
+---
+--- Passing open == false skips the window entirely: Begin() returns
+--- `false, false` without drawing anything, and every widget call inside
+--- becomes a cheap no-op — but End() must still be called.
+---
+--- flags is a string or array of strings: "NoTitleBar", "NoMove",
+--- "NoResize", "NoCollapse", "AlwaysAutoResize", "NoScrollbar". An unknown
+--- flag name is an error, not a silent no-op.
+---
+--- A window auto-fits to its content until it is explicitly given a size —
+--- via SetNextWindowSize() or by the user dragging the resize grip — at
+--- which point its size becomes sticky and overflowing content scrolls
+--- instead of growing the window ("AlwaysAutoResize" opts a window out of
+--- this permanently, exactly like ImGui's flag of the same name).
+--- Equivalent of ImGui::Begin(name, p_open, flags).
+function imlove.Begin(title, open, flags)
   if not ctx.inFrame then
     error("imlove.Begin() called before imlove.NewFrame()", 2)
   end
   if ctx.currentWindow then
-    error("imlove.Begin('" .. tostring(title) .. "') called while window '"
-      .. ctx.currentWindow.title .. "' is open — missing imlove.End()", 2)
+    local open = ctx.currentWindow
+    error("imlove.Begin('" .. tostring(title) .. "') called while "
+      .. (open.isChild
+        and ("BeginChild('" .. open.idStr .. "') is open — missing imlove.EndChild()")
+        or ("window '" .. open.title .. "' is open — missing imlove.End()")), 2)
   end
   title = tostring(title)
   local displayTitle, idText = splitLabel(title)
 
   local win = ctx.windows[title]
   if not win then
-    win = { title = title, collapsed = false, w = 0, h = 0 }
+    win = { title = title, collapsed = false, w = 0, h = 0,
+      scrollY = 0, sizeMode = "auto" }
     -- Cascade new windows so they don't all spawn on top of each other.
     win.x = 40 + ctx.windowCount * 30
     win.y = 40 + ctx.windowCount * 30
@@ -461,6 +663,33 @@ function imlove.Begin(title)
     error("imlove.Begin('" .. title .. "') called twice in one frame", 2)
   end
 
+  ctx.currentWindow = win
+  ctx.idStack = { idText }
+  win.flags = normalizeFlags(flags, "Begin")
+
+  if open == false then
+    -- Not submitted at all: don't touch position/size/draw list/lastFrame,
+    -- so it behaves exactly like a window whose Begin() stopped being
+    -- called (see windowAt()) — it simply stops existing for this frame.
+    -- None of the grip/collapse-arrow/close-button behavior() calls below
+    -- will run this frame (or any frame until it's reopened), so release any
+    -- stale claim on them now — see releaseIfActive()'s comment.
+    releaseIfActive(makeId("#GRIP"))
+    releaseIfActive(makeId("#COLLAPSE"))
+    releaseIfActive(makeId("#CLOSE"))
+    if ctx.resizeWindow == win then ctx.resizeWindow = nil end
+    if ctx.dragWindow == win then ctx.dragWindow = nil end
+    win.skipItems = true
+    win.notSubmitted = true
+    win.indent = 0
+    win.openChild = nil
+    win.prevItem = win.prevItem
+      or { x = 0, y = 0, w = 0, h = 0, hovered = false, active = false,
+        clicked = false }
+    return false, false
+  end
+  win.notSubmitted = false
+
   local pending = ctx.nextWindowPos
   if pending then
     if pending.cond ~= "once" or not win.placed then
@@ -469,14 +698,35 @@ function imlove.Begin(title)
     ctx.nextWindowPos = nil
   end
   win.placed = true
-  win.lastFrame = ctx.frame
 
-  ctx.currentWindow = win
-  ctx.idStack = { idText }
+  -- A window can never be sized shorter than its title bar plus a couple of
+  -- content lines, or narrower than the style's minimum — otherwise it
+  -- could clip away its own chrome (grip, scrollbar, close button).
+  local minWinH = ctx.font:getHeight() + style.framePadding[2] * 2 -- titleH
+    + frameHeight() * 2 + style.windowPadding * 2
+
+  local pendingSize = ctx.nextWindowSize
+  if pendingSize then
+    if win.flags.AlwaysAutoResize then
+      -- Explicitly ignored: this flag means "always fit content", full stop.
+    elseif pendingSize.cond ~= "once" or not win.sizePlaced then
+      win.w = math.max(pendingSize.w, style.minWindowWidth)
+      win.h = math.max(pendingSize.h, minWinH)
+      win.sizeMode = "fixed"
+      win.sizePlaced = true
+    end
+    ctx.nextWindowSize = nil
+  end
+
+  win.lastFrame = ctx.frame
 
   local fpx, fpy = style.framePadding[1], style.framePadding[2]
   local pad = style.windowPadding
   win.titleH = ctx.font:getHeight() + fpy * 2
+  local flagSet = win.flags
+  local hasTitleBar = not flagSet.NoTitleBar
+  if not hasTitleBar then win.collapsed = false end
+  win.titleBarH = hasTitleBar and win.titleH or 0
 
   -- If this window is being dragged, follow the mouse (before drawing
   -- anything, so there is no visible lag).
@@ -485,57 +735,161 @@ function imlove.Begin(title)
     win.y = ctx.mouse.y - win.dragOffsetY
   end
 
+  -- Same idea for an in-progress resize (dragging the corner grip): apply
+  -- it before drawing so the frame the drag starts already reflects it.
+  local resizable = not flagSet.NoResize and not flagSet.AlwaysAutoResize
+  if resizable then
+    local gs = style.gripSize
+    local gx = win.x + win.w - gs
+    local gy = win.y + win.h - gs
+    local gripId = makeId("#GRIP")
+    local _, gripHeld = behavior(win, gripId, gx, gy, gs, gs)
+    if gripHeld then
+      if ctx.resizeWindow ~= win then
+        ctx.resizeWindow = win
+        win.resizeStartX, win.resizeStartY = ctx.mouse.x, ctx.mouse.y
+        win.resizeStartW, win.resizeStartH = win.w, win.h
+      end
+      win.w = math.max(style.minWindowWidth,
+        win.resizeStartW + (ctx.mouse.x - win.resizeStartX))
+      win.h = math.max(minWinH,
+        win.resizeStartH + (ctx.mouse.y - win.resizeStartY))
+      win.sizeMode = "fixed"
+    elseif ctx.resizeWindow == win then
+      ctx.resizeWindow = nil
+    end
+  else
+    -- "NoResize"/"AlwaysAutoResize" flipped on mid-drag: give up the grip's
+    -- claim instead of silently going quiet (see releaseIfActive()).
+    releaseIfActive(makeId("#GRIP"))
+    if ctx.resizeWindow == win then ctx.resizeWindow = nil end
+  end
+
   -- Start this frame's draw list. Window width/height depend on the content
   -- that hasn't run yet, so the background and title-bar rects are pushed
   -- now and their sizes patched in End().
   win.drawList = {}
+  win.childRectList = {}
   win.bgCmd = pushRect(win, "fill", win.x, win.y, 0, 0,
     style.colors.windowBg, style.rounding)
-  local isFront = ctx.windowOrder[#ctx.windowOrder] == win
-  win.titleCmd = pushRect(win, "fill", win.x, win.y, 0, win.titleH,
-    isFront and style.colors.titleBgActive or style.colors.titleBg,
-    style.rounding)
 
-  -- Collapse arrow: a regular button-behavior region in the title bar.
   local ah = win.titleH
-  local _, _, arrowClicked = behavior(win, makeId("#COLLAPSE"),
-    win.x, win.y, ah, ah)
-  if arrowClicked then win.collapsed = not win.collapsed end
-  local cx, cy, r = win.x + ah * 0.5, win.y + ah * 0.5, ah * 0.24
-  if win.collapsed then -- arrow points right
-    pushTriangle(win, cx - r * 0.6, cy - r, cx - r * 0.6, cy + r,
-      cx + r, cy, style.colors.text)
-  else                  -- arrow points down
-    pushTriangle(win, cx - r, cy - r * 0.6, cx + r, cy - r * 0.6,
-      cx, cy + r, style.colors.text)
-  end
-  pushText(win, displayTitle, win.x + ah + 2, win.y + fpy, style.colors.text)
+  if hasTitleBar then
+    local isFront = ctx.windowOrder[#ctx.windowOrder] == win
+    win.titleCmd = pushRect(win, "fill", win.x, win.y, 0, win.titleH,
+      isFront and style.colors.titleBgActive or style.colors.titleBg,
+      style.rounding)
 
-  -- Start a title-bar drag: mouse pressed on the title bar and nothing else
-  -- claimed the press (the collapse arrow claims it via activeId).
-  if ctx.mouse.pressed and ctx.hoveredWindow == win
-      and ctx.activeId == nil and ctx.dragWindow == nil
-      and pointIn(ctx.mouse.x, ctx.mouse.y,
-        win.x, win.y, math.max(win.w, ah), win.titleH) then
-    ctx.dragWindow = win
-    win.dragOffsetX = ctx.mouse.x - win.x
-    win.dragOffsetY = ctx.mouse.y - win.y
+    -- Collapse arrow: a regular button-behavior region in the title bar.
+    local collapsible = not flagSet.NoCollapse
+    if collapsible then
+      local _, _, arrowClicked = behavior(win, makeId("#COLLAPSE"),
+        win.x, win.y, ah, ah)
+      if arrowClicked then win.collapsed = not win.collapsed end
+    else
+      -- "NoCollapse" flipped on mid-hold: release, don't go quiet.
+      releaseIfActive(makeId("#COLLAPSE"))
+      win.collapsed = false
+    end
+    local cx, cy, r = win.x + ah * 0.5, win.y + ah * 0.5, ah * 0.24
+    if win.collapsed then -- arrow points right
+      pushTriangle(win, cx - r * 0.6, cy - r, cx - r * 0.6, cy + r,
+        cx + r, cy, style.colors.text)
+    else                  -- arrow points down
+      pushTriangle(win, cx - r, cy - r * 0.6, cx + r, cy - r * 0.6,
+        cx, cy + r, style.colors.text)
+    end
+    pushText(win, displayTitle, win.x + ah + 2, win.y + fpy, style.colors.text)
+
+    -- Close button: a small X at the title bar's right edge, only when the
+    -- caller passed an `open` value (nil means "no close button", as today).
+    if open ~= nil then
+      local bx, by = win.x + win.w - ah, win.y
+      local closeId = makeId("#CLOSE")
+      local closeHovered, closeHeld, closePressed =
+        behavior(win, closeId, bx, by, ah, ah)
+      if closePressed then win.closedThisFrame = true end
+      if closeHeld or closeHovered then
+        pushRect(win, "fill", bx, by, ah, ah,
+          closeHeld and style.colors.buttonActive
+          or style.colors.buttonHovered, style.rounding)
+      end
+      local ip = ah * 0.28
+      pushLine(win, bx + ip, by + ip, bx + ah - ip, by + ah - ip,
+        style.colors.text)
+      pushLine(win, bx + ah - ip, by + ip, bx + ip, by + ah - ip,
+        style.colors.text)
+    else
+      -- The `open` argument stopped being passed (back to nil, "no close
+      -- button"): release, don't go quiet.
+      releaseIfActive(makeId("#CLOSE"))
+    end
+
+    -- Start a title-bar drag: mouse pressed on the title bar and nothing
+    -- else claimed the press (the collapse arrow/close button claim it via
+    -- activeId).
+    if not flagSet.NoMove and ctx.mouse.pressed and ctx.hoveredWindow == win
+        and ctx.activeId == nil and ctx.dragWindow == nil
+        and pointIn(ctx.mouse.x, ctx.mouse.y,
+          win.x, win.y, math.max(win.w, ah), win.titleH) then
+      ctx.dragWindow = win
+      win.dragOffsetX = ctx.mouse.x - win.x
+      win.dragOffsetY = ctx.mouse.y - win.y
+    end
+  else
+    win.titleCmd = nil
+    -- "NoTitleBar" flipped on: takes the collapse arrow and close button
+    -- with it, so release any stale claim on them too.
+    releaseIfActive(makeId("#COLLAPSE"))
+    releaseIfActive(makeId("#CLOSE"))
   end
+
+  -- The resize grip itself: drawn last so it sits in front of the border
+  -- End() will add, in the bottom-right corner.
+  if resizable then
+    local gs = style.gripSize
+    pushTriangle(win, win.x + win.w, win.y + win.h - gs,
+      win.x + win.w - gs, win.y + win.h,
+      win.x + win.w, win.y + win.h, style.colors.border)
+  end
+
+  win.closedThisFrame = win.closedThisFrame or false
 
   -- Reset the layout cursor. skipItems makes every widget a cheap no-op
   -- while the window is collapsed (same trick as ImGui's SkipItems).
   win.skipItems = win.collapsed
   win.indent = 0
   win.innerX = win.x + pad
-  win.nextY = win.y + win.titleH + pad
+  win.nextY = win.y + win.titleBarH + pad - (win.scrollY or 0)
   win.lineY, win.lineH = win.nextY, 0
   win.sameLineX = nil
   win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0,
     hovered = false, active = false, clicked = false }
-  win.contentMaxX = win.x + ah + 2 + ctx.font:getWidth(displayTitle) + fpx
-  win.contentMaxY = win.y + win.titleH
+  win.contentMaxX = hasTitleBar
+    and (win.x + ah + 2 + ctx.font:getWidth(displayTitle) + fpx)
+    or win.x
+  win.contentMaxY = win.y + win.titleBarH
 
-  return not win.collapsed
+  -- Fixed-size windows clip their content region so it can't paint over the
+  -- title bar or below the window's own bounds — this is also what makes
+  -- scrolled-out widgets stop being clickable (see withinClip()). Auto-fit
+  -- windows never need this: they always grow to fit, so there's nothing to
+  -- clip against.
+  win.clipRect = nil
+  if not win.collapsed and win.sizeMode == "fixed" and not flagSet.AlwaysAutoResize then
+    local cy = win.y + win.titleBarH
+    local ch = math.max(win.h - win.titleBarH, 0)
+    pushClip(win, win.x, cy, win.w, ch)
+    win.clipRect = { x = win.x, y = cy, w = win.w, h = ch }
+  end
+
+  if win.closedThisFrame then
+    return not win.collapsed, false
+  end
+  if open == nil then
+    return not win.collapsed, nil
+  end
+  return not win.collapsed, true
 end
 
 --- Close the current window. Must be called exactly once for every Begin(),
@@ -546,19 +900,66 @@ function imlove.End()
   if not win then
     error("imlove.End() called without a matching imlove.Begin()", 2)
   end
+  if win.isChild then
+    error("imlove.End() called with BeginChild('" .. win.idStr
+      .. "') still open — missing imlove.EndChild()", 2)
+  end
   if #ctx.idStack > 1 then
     error("imlove.End(): " .. (#ctx.idStack - 1)
       .. " PushID()/TreeNode() left unpopped in window '" .. win.title .. "'", 2)
   end
 
+  if win.notSubmitted then
+    ctx.currentWindow = nil
+    ctx.idStack = {}
+    return
+  end
+
   local pad = style.windowPadding
-  win.w = math.max(win.contentMaxX + pad - win.x, style.minWindowWidth)
-  win.h = win.collapsed and win.titleH
-    or math.max(win.contentMaxY + pad - win.y, win.titleH)
+  local flagSet = win.flags or {}
+  local autoFit = flagSet.AlwaysAutoResize or win.sizeMode ~= "fixed"
+
+  if autoFit then
+    win.w = math.max(win.contentMaxX + pad - win.x, style.minWindowWidth)
+    win.h = win.collapsed and win.titleBarH
+      or math.max(win.contentMaxY + pad - win.y, win.titleBarH)
+    win.scrollY, win.contentH, win.visibleH = 0, 0, 0
+  else
+    if not win.collapsed then
+      popClip(win) -- close the content clip region pushed in Begin()
+    end
+    win.visibleH = math.max(win.h - win.titleBarH, 0)
+    -- contentMaxY was measured against a cursor that already started at
+    -- -scrollY (so content draws in the right place while scrolled), so add
+    -- it back here to get the scroll-independent total content height —
+    -- otherwise contentH would shrink as scrollY grows, clamping scrollY
+    -- back down and fighting the very scroll that just happened.
+    win.contentH = math.max(
+      win.contentMaxY + pad - (win.y + win.titleBarH) + win.scrollY, 0)
+    local maxScroll = math.max(win.contentH - win.visibleH, 0)
+    win.scrollY = clamp(win.scrollY, 0, maxScroll)
+  end
 
   -- Patch the rects whose width/height weren't known in Begin().
   win.bgCmd.w, win.bgCmd.h = win.w, win.h
-  win.titleCmd.w = win.w
+  if win.titleCmd then win.titleCmd.w = win.w end
+  win.lastChildRects = win.childRectList
+
+  win.hasScrollbar = not win.collapsed and not autoFit
+    and not flagSet.NoScrollbar and win.contentH > win.visibleH
+  if win.hasScrollbar then
+    -- The resize grip sits in the bottom-right corner, gripSize square, and
+    -- (being anchored to the same corner) always overlaps the bottom of a
+    -- full-height scrollbar track. Its behavior() runs earlier, in Begin(),
+    -- so it always wins that overlap — shorten the track instead of leaving
+    -- the scrollbar's bottom permanently dead under a resizable window.
+    local trackH = win.visibleH
+    local resizable = not flagSet.NoResize and not flagSet.AlwaysAutoResize
+    if resizable then trackH = math.max(trackH - style.gripSize, 0) end
+    pushScrollbar(win, makeId("#SCROLLBAR"),
+      win.x, win.y + win.titleBarH, win.w, trackH, win)
+  end
+
   pushRect(win, "line", win.x, win.y, win.w, win.h,
     style.colors.border, style.rounding)
 
@@ -575,6 +976,16 @@ function imlove.SetNextWindowPos(x, y, cond)
   ctx.nextWindowPos = { x = x, y = y, cond = cond or "always" }
 end
 
+--- Set the size the next Begin() will use, taking the window out of
+--- auto-fit mode (see Begin()'s sizing model) — from then on it keeps this
+--- size and overflowing content scrolls instead of growing the window.
+--- cond is "always" (default) or "once" (only the first time the window is
+--- ever created). Ignored by a window with the "AlwaysAutoResize" flag.
+--- Equivalent of ImGui::SetNextWindowSize().
+function imlove.SetNextWindowSize(w, h, cond)
+  ctx.nextWindowSize = { w = w, h = h, cond = cond or "always" }
+end
+
 --- Position of the current window. Equivalent of ImGui::GetWindowPos().
 function imlove.GetWindowPos()
   local win = requireWindow("GetWindowPos")
@@ -586,6 +997,143 @@ end
 function imlove.GetWindowSize()
   local win = requireWindow("GetWindowSize")
   return win.w, win.h
+end
+
+--- Begin a scrollable child region embedded at the cursor in the current
+--- window (or child) — a fixed-size box that participates in its root
+--- window's draw list (no separate z-order) and gets its own cursor, ID
+--- scope, and scroll position, keyed by idStr and persistent across frames
+--- like everything else. w/h <= 0 mean, respectively, "remaining width" and
+--- a 200px default (there is no well-defined "remaining height" the way
+--- there is width, since content can always continue below the fold).
+--- border, if truthy, draws a border line around it. Must be matched by
+--- EndChild(). Returns whether it's visible — with imlove's clipping model
+--- that's simply "false while an ancestor window/child is collapsed or
+--- skipping, true otherwise". Equivalent of ImGui::BeginChild().
+function imlove.BeginChild(idStr, w, h, border)
+  local parent = requireWindow("BeginChild")
+  idStr = tostring(idStr)
+  local resolvedW = (w and w > 0) and w or availWidth(parent)
+  local resolvedH = (h and h > 0) and h or 200
+
+  local root = parent.root or parent
+  local idStackBase = #ctx.idStack
+  ctx.idStack[idStackBase + 1] = idStr
+  -- Keyed by the FULL id-stack path, not the bare idStr: two BeginChild()
+  -- calls with the same idStr nested at different depths (e.g. "Row" at the
+  -- window's top level and "Row" again inside a "Wrapper" child) must not
+  -- share scroll state just because their last path segment matches.
+  local scrollKey = table.concat(ctx.idStack, "\31")
+
+  local cx, cy
+  if parent.skipItems then
+    cx, cy = parent.innerX or parent.x, parent.nextY or parent.y
+  else
+    cx, cy = itemAdd(parent, resolvedW, resolvedH)
+  end
+
+  root.childScroll = root.childScroll or {}
+  local scrollState = root.childScroll[scrollKey]
+  if not scrollState then
+    scrollState = { scrollY = 0, contentH = 0, visibleH = resolvedH }
+    root.childScroll[scrollKey] = scrollState
+  end
+
+  local pad = style.windowPadding
+  local child = {
+    isChild = true, title = idStr, idStr = idStr, scrollKey = scrollKey,
+    root = root, parent = parent,
+    idStackBase = idStackBase, border = border and true or false,
+    x = cx, y = cy, w = resolvedW, h = resolvedH,
+    indent = 0, innerX = cx + pad,
+    nextY = cy + pad - scrollState.scrollY,
+    sameLineX = nil,
+    prevItem = { x = cx + pad, y = cy + pad, w = 0, h = 0,
+      hovered = false, active = false, clicked = false },
+    contentMaxX = cx + pad, contentMaxY = cy + pad,
+    skipItems = parent.skipItems,
+    clipRect = { x = cx, y = cy, w = resolvedW, h = resolvedH },
+    drawList = parent.drawList,
+    scrollState = scrollState,
+    -- Last frame's "did this child show a scrollbar" (see availWidth()).
+    -- A fresh `child` table is built every call, so this must be read back
+    -- from the persistent scrollState, not the (nonexistent) previous child.
+    hasScrollbar = scrollState.hasScrollbar,
+  }
+  child.lineY, child.lineH = child.nextY, 0
+
+  if not parent.skipItems then
+    pushClip(child, cx, cy, resolvedW, resolvedH)
+  end
+
+  parent.openChild = child
+  ctx.currentWindow = child
+  return not parent.skipItems
+end
+
+--- Close the current BeginChild() region. Must be called exactly once per
+--- BeginChild(); Begin()/End() (and an outer BeginChild()/EndChild()) will
+--- error if you forget. Equivalent of ImGui::EndChild().
+function imlove.EndChild()
+  local win = ctx.currentWindow
+  if not win or not win.isChild then
+    error("imlove.EndChild() called without a matching imlove.BeginChild()", 2)
+  end
+  if win.openChild then
+    error("imlove.EndChild(): BeginChild('" .. win.openChild.idStr
+      .. "') still open — missing imlove.EndChild()", 2)
+  end
+  if #ctx.idStack ~= win.idStackBase + 1 then
+    error("imlove.EndChild(): " .. (#ctx.idStack - win.idStackBase - 1)
+      .. " PushID()/TreeNode() left unpopped in child '" .. win.idStr .. "'", 2)
+  end
+  ctx.idStack[#ctx.idStack] = nil
+
+  local parent = win.parent
+  parent.openChild = nil
+
+  if not win.skipItems then
+    popClip(win)
+
+    local pad = style.windowPadding
+    local st = win.scrollState
+    -- Same scrollY-added-back correction as End() — see the comment there.
+    -- The subtracted origin must be the UNPADDED win.y, exactly like End()
+    -- subtracts the unpadded (win.y + win.titleBarH) — not (win.y + pad):
+    -- BeginChild's initial contentMaxY (cy + pad) already accounts for the
+    -- top padding the same way a window's first widget does, so subtracting
+    -- an extra pad here double-counted it and made children under-scroll by
+    -- one windowPadding (the last line rested 2*pad from the bottom instead
+    -- of pad).
+    st.contentH = math.max(
+      win.contentMaxY + pad - win.y + st.scrollY, 0)
+    -- Also match End()'s visibleH convention: a window's visibleH is
+    -- win.h - titleBarH — the full remaining span down to the window's
+    -- bottom edge, with NO bottom pad subtracted (the resting gap at max
+    -- scroll comes entirely from contentH's "+pad" term, not from here). A
+    -- child has no title bar (its equivalent is 0), so its visibleH must be
+    -- the full win.h. Subtracting pad*2 here (as before) double-reserved the
+    -- bottom pad on top of contentH's own "+pad", shrinking maxScroll and
+    -- leaving content resting 3*pad from the edge instead of 1*pad.
+    st.visibleH = math.max(win.h, 0)
+    local maxScroll = math.max(st.contentH - st.visibleH, 0)
+    st.scrollY = clamp(st.scrollY, 0, maxScroll)
+
+    st.hasScrollbar = st.contentH > st.visibleH
+    if st.hasScrollbar then
+      pushScrollbar(win, makeId("#SCROLLBAR"), win.x, win.y, win.w, win.h, st)
+    end
+    if win.border then
+      pushRect(win, "line", win.x, win.y, win.w, win.h, style.colors.border, 0)
+    end
+
+    local root = win.root
+    root.childRectList = root.childRectList or {}
+    root.childRectList[#root.childRectList + 1] =
+      { id = win.scrollKey, x = win.x, y = win.y, w = win.w, h = win.h }
+  end
+
+  ctx.currentWindow = parent
 end
 
 --------------------------------------------------------------------------------
@@ -1401,10 +1949,15 @@ function imlove.mousereleased(x, y, button)
   return captured
 end
 
---- Forward from love.wheelmoved. v1 windows auto-size instead of scrolling,
---- so the wheel does nothing yet — but the event still reports as consumed
---- over a window, so the game doesn't zoom/scroll underneath the UI.
+--- Forward from love.wheelmoved. Latches dy to be applied to whatever
+--- window (or BeginChild() region) is under the mouse at the next
+--- NewFrame() — same latch-then-apply pattern as mouse press/release, so a
+--- wheelmoved() that arrives between frames is never dropped. Still reports
+--- consumed whenever the mouse is over any window, exactly as in v1, so the
+--- game doesn't zoom/scroll underneath the UI even for windows or
+--- "NoScrollbar" windows that have nothing to scroll.
 function imlove.wheelmoved(dx, dy)
+  ctx.wheelLatch = ctx.wheelLatch + dy
   return windowAt(ctx.mouse.x, ctx.mouse.y) ~= nil
 end
 

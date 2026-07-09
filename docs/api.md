@@ -22,7 +22,7 @@ the UI consumed the event (= your game should ignore it).
 |---|---|
 | `imlove.mousepressed(x, y, button)` | Required. |
 | `imlove.mousereleased(x, y, button)` | Required. |
-| `imlove.wheelmoved(dx, dy)` | Recommended: v1 has no scrolling, but this reports the wheel as consumed over a window so your game doesn't zoom under the UI. |
+| `imlove.wheelmoved(dx, dy)` | Recommended: scrolls the window or `BeginChild()` region under the mouse, and reports the wheel as consumed over any window so your game doesn't zoom under the UI. |
 | `imlove.keypressed(key)` | Optional in v1 (always returns `false`); wire it for forward compatibility. |
 | `imlove.textinput(text)` | Optional in v1; same story. |
 
@@ -35,11 +35,31 @@ the UI consumed the event (= your game should ignore it).
 
 | Function | Returns | Description |
 |---|---|---|
-| `imlove.Begin(title)` | `notCollapsed` | Open a window. Draggable, collapsible, state persists by title. When it returns `false` the window is collapsed and widget calls are cheap no-ops — you may skip them, but you must **always** call `End()`. |
+| `imlove.Begin(title, open, flags)` | `notCollapsed, open` | Open a window. Draggable, collapsible, state persists by title. When it returns `false` the window is collapsed and widget calls are cheap no-ops — you may skip them, but you must **always** call `End()`. `open` is optional: `nil` (default) means no close button and a `nil` second return; a boolean adds an X to the title bar and the second return reports it back, possibly toggled to `false` the frame it's clicked (reassign it to your variable, like any other imlove value); passing `false` skips the window entirely for this frame — `Begin` returns `false, false` and every widget call inside becomes a no-op, but `End()` is still required. `flags` is a string or array of strings — see "Window flags" below; an unknown flag name is an error. |
 | `imlove.End()` | — | Close the current window. Exactly one per `Begin`, collapsed or not. |
 | `imlove.SetNextWindowPos(x, y, cond)` | — | Position the next `Begin`. `cond` is `"always"` (default) or `"once"` (only when the window is first created — use this for default layouts the user can still drag around). |
+| `imlove.SetNextWindowSize(w, h, cond)` | — | Size the next `Begin` explicitly, taking it out of auto-fit mode: from then on the window keeps this size and overflowing content scrolls instead of growing it (see "Sizing model" below). `cond` is `"always"` (default) or `"once"`. Ignored by a window with the `"AlwaysAutoResize"` flag. |
 | `imlove.GetWindowPos()` | `x, y` | Current window's position. |
-| `imlove.GetWindowSize()` | `w, h` | Current window's size as of last frame (windows size themselves to their content at `End`). |
+| `imlove.GetWindowSize()` | `w, h` | Current window's size as of last frame (windows size themselves to their content at `End`, unless explicitly sized — see below). |
+| `imlove.BeginChild(idStr, w, h, border)` | `visible` | Begin a scrollable child region embedded at the cursor in the current window (or child): its own cursor, scroll position, and ID scope (pushes `idStr`), but no separate z-order — it draws into its root window's draw list. `w`/`h` &le; 0 mean, respectively, "remaining width" and a 200px default. `border`, if truthy, draws a border line around it. Must be matched by `EndChild()`; returns `false` only when an ancestor window/child is collapsed or otherwise skipping. |
+| `imlove.EndChild()` | — | Close the current `BeginChild()` region. Exactly one per `BeginChild()` — `End()` errors if you forget it, and vice versa. |
+
+#### Window flags
+
+Passed to `Begin()` as a bare string or an array of strings, e.g. `imlove.Begin("Log", nil, "NoScrollbar")` or `imlove.Begin("HUD", nil, {"NoTitleBar", "NoMove"})`. An unknown flag name is an `error()`, not a silent no-op.
+
+| Flag | Effect |
+|---|---|
+| `"NoTitleBar"` | No title bar: no drag region, no collapse arrow, no close button. Content starts at the window's top edge. |
+| `"NoMove"` | The title bar no longer drags the window. |
+| `"NoResize"` | No corner resize grip. |
+| `"NoCollapse"` | No collapse arrow (the title bar still drags, if `"NoMove"` isn't also set). |
+| `"AlwaysAutoResize"` | Always fits its content — no scrollbar, grip, or scrolling, ever. `SetNextWindowSize()` is ignored. This is the v1.1 behavior for every window. |
+| `"NoScrollbar"` | Hides the scrollbar, but the mouse wheel still scrolls the window while it's hovered. |
+
+#### Sizing model
+
+A window auto-fits its content, exactly like v1.1, until it's given an explicit size — via `SetNextWindowSize()` or by the user dragging its resize grip. From that point on its size is sticky: it no longer grows or shrinks to fit content, and content taller than the window scrolls (by mouse wheel, or by dragging the scrollbar that appears automatically once content overflows). `"AlwaysAutoResize"` opts a window out of this permanently. `BeginChild()` regions are always fixed-size and scrollable — there's no auto-fit mode for a child.
 
 ### Widgets
 

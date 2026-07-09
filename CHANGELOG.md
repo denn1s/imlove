@@ -7,6 +7,61 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+## [1.2.0] - 2026-07-09
+
+Windows grow up: clipping, scrolling, explicit sizing, and child regions —
+the library's first architectural change since v1.0's freeze. Every existing
+name and signature only gained optional trailing arguments; nothing that
+worked in v1.1 changes behavior.
+
+### Added
+
+- A clip/scissor stack in the draw list (`love.graphics.setScissor`, saved
+  and restored around `Render()` like the color/font state already was).
+  Fixed-size windows and `BeginChild()` regions clip their content so it
+  can't paint outside its own bounds, and scrolled-out-of-view widgets stop
+  being clickable.
+- Window scrolling: a fixed-size window's content taller than its visible
+  area scrolls by mouse wheel or by dragging a slim scrollbar on the right
+  edge (hidden with the `"NoScrollbar"` flag, but the wheel still works).
+  Auto-fit windows never overflow — scrolling only applies once a window has
+  an explicit size (see below).
+- `imlove.SetNextWindowSize(w, h, cond)` and a manual resize grip (bottom-
+  right corner) — either takes a window out of auto-fit mode into a sticky,
+  explicit size, mirroring ImGui's sizing model. The `"AlwaysAutoResize"`
+  flag opts a window out of this permanently (the exact v1.1 behavior).
+- `imlove.Begin(title, open, flags)` gained two optional arguments: `open`
+  adds a close button and reports it back (possibly toggled to `false`),
+  same convention as ImGui's `p_open` but by value instead of by pointer;
+  passing `open == false` skips the window (and every widget call inside)
+  entirely for that frame. `flags` is a string or array of strings:
+  `"NoTitleBar"`, `"NoMove"`, `"NoResize"`, `"NoCollapse"`,
+  `"AlwaysAutoResize"`, `"NoScrollbar"` — an unknown flag name is an
+  `error()`, not a silent no-op.
+- `imlove.BeginChild(idStr, w, h, border)` / `imlove.EndChild()` — a
+  fixed-size scrollable region embedded at the cursor, with its own cursor,
+  scroll position, and ID scope, drawing into its root window's draw list
+  (no separate z-order). Nested children route the mouse wheel to the
+  innermost hovered one.
+- `imlove.wheelmoved(dx, dy)` now latches `dy` and applies it to whatever
+  window or `BeginChild()` region is under the mouse at the next
+  `NewFrame()` — same latch-then-apply pattern as mouse press/release, so no
+  event delivered between frames is dropped. Its return value (consumed
+  whenever the mouse is over any window) is unchanged.
+- 32 new headless tests covering the clip stack, scroll clamping, wheel
+  latching, the scrollbar's click-to-position mapping, the `Begin` open-
+  param return-value matrix, every window flag, sizing-model transitions,
+  `BeginChild`/`EndChild` layout, scrolling, ID scoping, and mismatched
+  Begin/BeginChild error cases, plus regressions for the resize grip/close
+  button/collapse arrow releasing their claim when disabled mid-hold,
+  per-nesting-path child scroll state, the resize grip no longer swallowing
+  the scrollbar's bottom, `availWidth()` reserving the scrollbar gutter, and
+  `EndChild()`'s resting bottom padding (`tests/test_windows_v12.lua`).
+
+### Changed
+
+- `_VERSION` is now `"1.2.0"`.
+
 ## [1.1.0] - 2026-07-09
 
 More widgets, zero new machinery — everything below reuses the existing

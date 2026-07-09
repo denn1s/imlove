@@ -15,10 +15,12 @@ reference](api.md) are the complete story on their own.
 | `mousepressed(...)` etc. | backend event handlers | Return `true` when consumed — per-event `WantCaptureMouse`. |
 | `io.WantCaptureMouse` | `ImGuiIO::WantCaptureMouse` | Same meaning; valid after `NewFrame()`. |
 | `io.WantCaptureKeyboard` | `ImGuiIO::WantCaptureKeyboard` | Always `false` in v1 (no keyboard widgets). |
-| `Begin(title)` | `ImGui::Begin(name, bool* p_open, flags)` | No close button, no flags. Windows behave as if `ImGuiWindowFlags_AlwaysAutoResize` were set: they fit their content, no manual resize, no scrolling. |
+| `Begin(title, open, flags)` | `ImGui::Begin(name, bool* p_open, flags)` | `open` is a plain value, not a pointer: pass a boolean to get a close button, and reassign the returned second value back to your variable (`nil` in, `nil` back = no close button, matching a `NULL p_open`). `flags` is a string or array of strings, not a bitmask — see [api.md](api.md#window-flags) for the list; there is no full parity with `ImGuiWindowFlags` (e.g. no `NoBackground`, `MenuBar`, `HorizontalScrollbar`). Windows auto-fit their content until explicitly sized (`SetNextWindowSize()` or a grip drag), same spirit as ImGui but framed as an explicit mode switch rather than a flag combination. |
 | `End()` | `ImGui::End()` | Identical rule: always call it. |
 | `SetNextWindowPos(x, y, cond)` | `ImGui::SetNextWindowPos(pos, cond)` | `cond` is a string: `"always"` / `"once"` (≈ `ImGuiCond_FirstUseEver`). |
+| `SetNextWindowSize(w, h, cond)` | `ImGui::SetNextWindowSize(size, cond)` | `w, h` instead of an `ImVec2 size`; `cond` is the same string convention as `SetNextWindowPos`. |
 | `GetWindowPos()` / `GetWindowSize()` | same | Return `x, y` / `w, h` instead of `ImVec2`. |
+| `BeginChild(idStr, w, h, border)` / `EndChild()` | `ImGui::BeginChild(str_id, size, border/flags)` / `ImGui::EndChild()` | `w, h` instead of an `ImVec2 size`; `border` is a plain boolean, not a bitmask overload. No separate z-order/window: a child shares its root window's draw list, so it always draws inline with the rest of the window's content rather than as an independently-clipped sub-window. Always scrollable — there's no ImGui-style `NoScrollWithMouse`/`AlwaysUseWindowPadding` flag set. |
 | `Text(fmt, ...)` | `ImGui::Text(fmt, ...)` | `string.format` semantics rather than printf (same `%` specifiers). |
 | `TextColored(color, fmt, ...)` | `ImGui::TextColored(col, fmt, ...)` | `color` is a plain `{r, g, b, a}` table (0..1) instead of `ImVec4`. |
 | `TextDisabled(fmt, ...)` | same | Identical contract; uses the one built-in theme's disabled gray. |

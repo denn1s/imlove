@@ -5,12 +5,21 @@ Kitchen-sink example for imlove. Run from the repo root with:
     love . kitchensink
 
 There is a tiny "game" (drifting circles standing in for entities) plus
-three imlove windows:
+seven imlove windows:
 
-  * "Widget gallery"   — every widget in the library, once.
-  * "Entity Inspector" — the realistic use case: a tree of entities where
-                         selecting one exposes its fields as live sliders.
-  * "World"            — pause/step-style controls for the game itself.
+  * "Widget gallery"    — every widget in the library, once.
+  * "Entity Inspector"  — the realistic use case: a tree of entities where
+                          selecting one exposes its fields as live sliders.
+  * "World"             — pause/step-style controls for the game itself.
+  * "Tip##v12"          — v1.2: the close-button/`open` param round trip —
+                          close it with the X, then re-open it with the
+                          checkbox in the Widget gallery.
+  * "Long list (50 items)##v12" — v1.2: an explicitly-sized, scrolling
+                          window (`SetNextWindowSize` + the resize grip).
+  * "Event log##v12"    — v1.2: a bordered, scrollable `BeginChild()`
+                          region logging game/UI events as they happen.
+  * an untitled top-right overlay — v1.2: a `"NoTitleBar", "NoMove"` FPS
+                          HUD, the classic overlay-widget pattern.
 
 Click a circle in the world to select it, and notice that clicks on the UI
 never reach the game: mousepressed below checks imlove's return value.
@@ -94,7 +103,18 @@ local gallery = {
   dragInt = 0,
   mode = "walk",
   frameTimes = {},
+  showTip = true, -- v1.2: reopens the "Tip##v12" window (see tipWindow())
 }
+
+-- A running log feeding the "Event log##v12" window's bordered BeginChild,
+-- v1.2's scrollable-sub-region feature. Capped like the frame-time buffer.
+local EVENT_LOG_HISTORY = 200
+local eventLog = {}
+
+local function logEvent(fmt, ...)
+  eventLog[#eventLog + 1] = fmt:format(...)
+  if #eventLog > EVENT_LOG_HISTORY then table.remove(eventLog, 1) end
+end
 
 -- A rolling buffer of frame times, the canonical PlotLines() feed. Capped so
 -- the plot always shows the same time window regardless of framerate.
@@ -134,6 +154,7 @@ local function widgetGallery()
     end
 
     gallery.checked = imlove.Checkbox("A checkbox", gallery.checked)
+    gallery.showTip = imlove.Checkbox("Show tip window", gallery.showTip)
     gallery.value = imlove.SliderFloat("a slider", gallery.value, 0, 1)
     gallery.sliderInt = imlove.SliderInt("an int slider", gallery.sliderInt,
       0, 10)
@@ -197,7 +218,10 @@ local function entityInspector()
     if imlove.TreeNode("Entities") then
       for i, e in ipairs(entities) do
         imlove.PushID(i)
-        if imlove.Selectable(e.name, selected == e) then selected = e end
+        if imlove.Selectable(e.name, selected == e) then
+          selected = e
+          logEvent("selected %s", e.name)
+        end
         imlove.PopID()
       end
       imlove.TreePop()
@@ -210,7 +234,10 @@ local function entityInspector()
       selected.speed = imlove.SliderFloat("speed", selected.speed, 0, 200)
       selected.radius = imlove.SliderFloat("radius", selected.radius, 2, 40)
       selected.alive = imlove.Checkbox("alive", selected.alive)
-      if imlove.Button("Deselect") then selected = nil end
+      if imlove.Button("Deselect") then
+        logEvent("deselected %s", selected.name)
+        selected = nil
+      end
     else
       imlove.Text("Select an entity above, or\nclick a circle in the world.")
     end
@@ -221,12 +248,84 @@ end
 local function worldControls()
   imlove.SetNextWindowPos(560, 260, "once")
   if imlove.Begin("World") then
+    local wasPaused = world.paused
     world.paused = imlove.Checkbox("Paused", world.paused)
+    if world.paused ~= wasPaused then
+      logEvent(world.paused and "paused" or "unpaused")
+    end
     world.timescale = imlove.SliderFloat("time scale", world.timescale, 0, 3)
     if imlove.Button("Reset world") then
       load()
       selected = nil
+      logEvent("world reset")
     end
+  end
+  imlove.End()
+end
+
+-- v1.2: the `Begin(title, open, flags)` close-button round trip. `open` is
+-- passed in every frame regardless of its value — when it's `false` (the
+-- user clicked the X last frame), `Begin` still must be paired with `End()`,
+-- but internally skips the window and every widget call between them. The
+-- "Show tip window" checkbox in the Widget gallery flips it back to `true`.
+local function tipWindow()
+  imlove.SetNextWindowPos(360, 20, "once")
+  imlove.SetNextWindowSize(190, 110, "once")
+  local notCollapsed, open = imlove.Begin("Tip##v12", gallery.showTip)
+  if notCollapsed then
+    imlove.TextWrapped("Close me with the X. Bring me back with the " ..
+      "checkbox in the Widget gallery.")
+  end
+  imlove.End()
+  gallery.showTip = open
+end
+
+-- v1.2: an explicitly-sized window (SetNextWindowSize) whose content — 50
+-- Selectable rows — is much taller than its fixed height, so it scrolls by
+-- mouse wheel or by dragging the scrollbar/resize grip. Auto-fit windows
+-- (every other window in this demo) never need to do this.
+local function longListWindow()
+  imlove.SetNextWindowPos(770, 55, "once")
+  imlove.SetNextWindowSize(210, 190, "once")
+  if imlove.Begin("Long list (50 items)##v12") then
+    imlove.TextDisabled("Explicit size + scrolling.")
+    for i = 1, 50 do
+      imlove.PushID(i)
+      imlove.Selectable(("item %02d"):format(i), false)
+      imlove.PopID()
+    end
+  end
+  imlove.End()
+end
+
+-- v1.2: a bordered, fixed-size BeginChild()/EndChild() region embedded in an
+-- otherwise auto-fit window — its own scroll position and cursor, but no
+-- separate z-order (it draws into "Event log##v12"'s own draw list).
+local function eventLogWindow()
+  imlove.SetNextWindowPos(560, 460, "once")
+  if imlove.Begin("Event log##v12") then
+    imlove.Text("Recent events:")
+    if imlove.BeginChild("log", 260, 140, true) then
+      if #eventLog == 0 then
+        imlove.TextDisabled("(nothing yet)")
+      end
+      for _, line in ipairs(eventLog) do
+        imlove.Text("%s", line)
+      end
+    end
+    imlove.EndChild()
+  end
+  imlove.End()
+end
+
+-- v1.2: an overlay-style HUD — "NoTitleBar"+"NoMove" strip the window down
+-- to a bare content box pinned in a screen corner, the classic ImGui FPS-
+-- counter pattern. Repinned every frame ("always") since NoMove only blocks
+-- dragging, not SetNextWindowPos.
+local function fpsOverlay()
+  imlove.SetNextWindowPos(870, 10, "always")
+  if imlove.Begin("##fps-overlay", nil, { "NoTitleBar", "NoMove" }) then
+    imlove.TextColored({ 0.4, 0.9, 1, 1 }, "FPS: %d", love.timer.getFPS())
   end
   imlove.End()
 end
@@ -244,6 +343,10 @@ function M.update(dt)
   widgetGallery()        -- ...then declare the UI anywhere you like...
   entityInspector()
   worldControls()
+  tipWindow()
+  longListWindow()
+  eventLogWindow()
+  fpsOverlay()
   updateWorld(dt)
 end
 
@@ -259,6 +362,7 @@ function M.mousepressed(x, y, button)
     local dx, dy = x - e.x, y - e.y
     if e.alive and dx * dx + dy * dy <= (e.radius + 3) ^ 2 then
       selected = e
+      logEvent("selected %s", e.name)
       return
     end
   end
