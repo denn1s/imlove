@@ -321,7 +321,10 @@ function imlove.NewFrame()
   end
   ctx.frame = ctx.frame + 1
   ctx.inFrame = true
-  ctx.font = love.graphics.getFont()
+  -- The UI owns its font. Adopting the game's current font here (as v1.0.0
+  -- did) is a trap: the game may release() that font at any time — e.g. a
+  -- scene unloading — and the UI would then draw with a dead object.
+  ctx.font = ctx.font or love.graphics.newFont(13)
 
   local m = ctx.mouse
   m.x, m.y = love.mouse.getPosition()

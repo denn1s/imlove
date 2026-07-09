@@ -24,6 +24,7 @@ function stub.install()
   love = {
     graphics = {
       getFont   = function() return font end,
+      newFont   = function() return font end,
       setFont   = record("setFont"),
       getColor  = function() return 1, 1, 1, 1 end,
       setColor  = record("setColor"),
