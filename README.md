@@ -117,12 +117,10 @@ local function entityInspector()
 end
 ```
 
-See `main.lua` for this running inside an actual game loop (`love .` in this
-repo runs the kitchen-sink demo).
+See `examples/kitchensink.lua` for this running inside an actual game loop
+(`love .` in this repo runs the kitchen-sink example).
 
-## API reference
-
-General conventions:
+## API conventions
 
 - All functions live on the module table and use ImGui's PascalCase names.
 - Where C++ ImGui writes results through pointers (`bool*`, `float*`), imlove
@@ -132,108 +130,20 @@ General conventions:
   scope are the same widget. Disambiguate with `"Label##anything"` (the part
   after `##` is invisible but part of the ID) or with `PushID`/`PopID`.
 
-### Frame lifecycle
+## Documentation
 
-| Function | Description |
-|---|---|
-| `imlove.NewFrame()` | Start a UI frame. Call once per frame before any other imlove call — the top of `love.update` is the natural place. |
-| `imlove.Render()` | Draw the UI. Call at the end of `love.draw`. Saves and restores the LÖVE graphics state around itself. |
-
-### LÖVE callback forwards
-
-Call each from the matching `love.*` callback. Every one returns `true` when
-the UI consumed the event (= your game should ignore it).
-
-| Function | Notes |
-|---|---|
-| `imlove.mousepressed(x, y, button)` | Required. |
-| `imlove.mousereleased(x, y, button)` | Required. |
-| `imlove.wheelmoved(dx, dy)` | Recommended: v1 has no scrolling, but this reports the wheel as consumed over a window so your game doesn't zoom under the UI. |
-| `imlove.keypressed(key)` | Optional in v1 (always returns `false`); wire it for forward compatibility. |
-| `imlove.textinput(text)` | Optional in v1; same story. |
-
-| Flag | Meaning |
-|---|---|
-| `imlove.io.WantCaptureMouse` | After `NewFrame()`: the mouse is over/held by the UI this frame. |
-| `imlove.io.WantCaptureKeyboard` | Always `false` in v1. |
-
-### Windows
-
-| Function | Returns | Description |
-|---|---|---|
-| `imlove.Begin(title)` | `notCollapsed` | Open a window. Draggable, collapsible, state persists by title. When it returns `false` the window is collapsed and widget calls are cheap no-ops — you may skip them, but you must **always** call `End()`. |
-| `imlove.End()` | — | Close the current window. Exactly one per `Begin`, collapsed or not. |
-| `imlove.SetNextWindowPos(x, y, cond)` | — | Position the next `Begin`. `cond` is `"always"` (default) or `"once"` (only when the window is first created — use this for default layouts the user can still drag around). |
-| `imlove.GetWindowPos()` | `x, y` | Current window's position. |
-| `imlove.GetWindowSize()` | `w, h` | Current window's size as of last frame (windows size themselves to their content at `End`). |
-
-### Widgets
-
-| Function | Returns | Description |
-|---|---|---|
-| `imlove.Text(fmt, ...)` | — | Static text. Extra args go through `string.format`. `\n` makes multiple lines. |
-| `imlove.Button(label)` | `pressed` | `true` on the frame the button is clicked (mouse released over it). |
-| `imlove.Checkbox(label, value)` | `value, changed` | Toggles on click. Assign the first return back to your variable. |
-| `imlove.SliderFloat(label, value, min, max)` | `value, changed` | Horizontal slider; click or drag anywhere on the track. Assign the first return back. |
-| `imlove.TreeNode(label)` | `open` | Collapsible node; open state persists. When `open`, children are indented and the label is pushed on the ID stack — call `TreePop()` after them. |
-| `imlove.TreePop()` | — | Close the innermost open `TreeNode`. Call once per `TreeNode` that returned `true`. |
-| `imlove.Selectable(label, selected)` | `clicked` | Full-width selectable row for pick-one-from-a-list UIs. You own the selection state. |
-| `imlove.Separator()` | — | Horizontal line. |
-| `imlove.SameLine()` | — | Place the next widget on the same row as the previous one. |
-
-### ID stack
-
-| Function | Description |
-|---|---|
-| `imlove.PushID(id)` | Push a string or number onto the ID stack. Wrap list items in `PushID(i)`/`PopID()` so identical labels don't collide. |
-| `imlove.PopID()` | Pop it. `End()` will error if you forget. |
-
-### Item queries
-
-| Function | Returns | Description |
-|---|---|---|
-| `imlove.GetItemRectMin()` | `x, y` | Top-left of the last widget's rectangle. |
-| `imlove.GetItemRectMax()` | `x, y` | Bottom-right of the last widget's rectangle. |
-
-## Dear ImGui equivalence table
-
-| imlove | Dear ImGui | Semantic differences |
-|---|---|---|
-| `NewFrame()` | `ImGui::NewFrame()` | Also polls the mouse; no separate backend. |
-| `Render()` | `ImGui::Render()` + backend render | One call does both. |
-| `mousepressed(...)` etc. | backend event handlers | Return `true` when consumed — per-event `WantCaptureMouse`. |
-| `io.WantCaptureMouse` | `ImGuiIO::WantCaptureMouse` | Same meaning; valid after `NewFrame()`. |
-| `io.WantCaptureKeyboard` | `ImGuiIO::WantCaptureKeyboard` | Always `false` in v1 (no keyboard widgets). |
-| `Begin(title)` | `ImGui::Begin(name, bool* p_open, flags)` | No close button, no flags. Windows behave as if `ImGuiWindowFlags_AlwaysAutoResize` were set: they fit their content, no manual resize, no scrolling. |
-| `End()` | `ImGui::End()` | Identical rule: always call it. |
-| `SetNextWindowPos(x, y, cond)` | `ImGui::SetNextWindowPos(pos, cond)` | `cond` is a string: `"always"` / `"once"` (≈ `ImGuiCond_FirstUseEver`). |
-| `GetWindowPos()` / `GetWindowSize()` | same | Return `x, y` / `w, h` instead of `ImVec2`. |
-| `Text(fmt, ...)` | `ImGui::Text(fmt, ...)` | `string.format` semantics rather than printf (same `%` specifiers). |
-| `Button(label)` | `ImGui::Button(label, size)` | No size argument; sized to the label. |
-| `Checkbox(label, v)` | `ImGui::Checkbox(label, bool* v)` | Returns `newValue, changed` instead of mutating `v`. |
-| `SliderFloat(label, v, min, max)` | `ImGui::SliderFloat(label, float* v, min, max, fmt, flags)` | Returns `newValue, changed`; fixed `%.3f` display; no format/flags/ctrl-click-to-type. Chosen over `DragFloat` because a bounded slider is what tuning panels want. |
-| `TreeNode(label)` / `TreePop()` | same | Identical contract, including the implicit ID push while open. |
-| `Selectable(label, selected)` | `ImGui::Selectable(label, selected)` | No size/flags. |
-| `Separator()` / `SameLine()` | same | `SameLine()` takes no offset/spacing arguments. |
-| `PushID(id)` / `PopID()` | same | Accepts strings and numbers. |
-| `"Label##id"` | same | Identical convention, including in window titles. |
-| `GetItemRectMin/Max()` | same | Return `x, y` instead of `ImVec2`. |
-
-Other deviations worth knowing:
-
-- **IDs are compared as strings**, not hashed — `PushID(7)` and `PushID("7")`
-  are the same ID. In practice this never matters for debug UIs.
-- **One built-in color scheme.** There is no styling API.
-- **Coordinates are LÖVE screen pixels.** No ImVec2 anywhere; functions take
-  and return plain `x, y` pairs.
+- [docs/api.md](docs/api.md) — the full function-by-function reference.
+- [docs/imgui.md](docs/imgui.md) — for people coming from Dear ImGui: what
+  transfers directly and what's different.
+- [ROADMAP.md](ROADMAP.md) — what's planned past v1, and what's a deliberate
+  non-goal.
+- [CHANGELOG.md](CHANGELOG.md) — release history.
 
 ## Non-goals (v1)
 
-Deliberately not included, to keep the library one small readable file:
-docking, menus/menu bars, tables/columns, text input fields, images,
-styling/theming beyond the built-in scheme, window scrolling or manual
-resizing, multi-window z-reordering beyond click-to-raise, touch input,
-gamepad/keyboard navigation.
+Deliberately not included, to keep the library one small readable file. See
+[ROADMAP.md](ROADMAP.md) for what's planned and the full, current list of
+continued non-goals.
 
 The v1 API is a contract: after the `v1.0.0` tag, names and signatures only
 gain things, they never change.
@@ -241,9 +151,19 @@ gain things, they never change.
 ## Running the demo and the tests
 
 ```sh
-love .                  # kitchen-sink demo (needs LÖVE 11.5)
-luajit tests/run.lua    # headless test suite (no LÖVE needed)
+love .                   # kitchen-sink example (needs LÖVE 11.5)
+love . game              # a small real-game integration example
+love . <name>            # any examples/<name>.lua
+luajit tests/run.lua     # headless test suite (no LÖVE needed)
 ```
+
+`main.lua` is a small dispatcher: it loads `examples/<name>.lua` (default
+`kitchensink`) and installs whatever LÖVE callbacks that module defines. Each
+example does its own imlove integration end to end — `require`, `NewFrame`/
+`Render`, input forwarding — so the `examples/` directory doubles as
+integration documentation. See `examples/kitchensink.lua` for the full
+widget gallery and `examples/game.lua` for the WantCaptureMouse pattern
+inside an actual game loop.
 
 The tests stub the `love` API (see `tests/stub_love.lua`) — the library only
 touches LÖVE at runtime, never at `require` time, which is also what makes it
