@@ -20,15 +20,32 @@ reference](api.md) are the complete story on their own.
 | `SetNextWindowPos(x, y, cond)` | `ImGui::SetNextWindowPos(pos, cond)` | `cond` is a string: `"always"` / `"once"` (≈ `ImGuiCond_FirstUseEver`). |
 | `GetWindowPos()` / `GetWindowSize()` | same | Return `x, y` / `w, h` instead of `ImVec2`. |
 | `Text(fmt, ...)` | `ImGui::Text(fmt, ...)` | `string.format` semantics rather than printf (same `%` specifiers). |
-| `Button(label)` | `ImGui::Button(label, size)` | No size argument; sized to the label. |
+| `TextColored(color, fmt, ...)` | `ImGui::TextColored(col, fmt, ...)` | `color` is a plain `{r, g, b, a}` table (0..1) instead of `ImVec4`. |
+| `TextDisabled(fmt, ...)` | same | Identical contract; uses the one built-in theme's disabled gray. |
+| `TextWrapped(fmt, ...)` | same | Wraps to the window's available width, computed with the same one-frame lag as every other layout query in imlove. |
+| `BulletText(fmt, ...)` | same | Identical contract. |
+| `Button(label, w, h)` | `ImGui::Button(label, size)` | `w, h` instead of an `ImVec2 size`; 0 or nil on either axis auto-sizes that axis, matching `ImVec2(0, 0)`. |
+| `SmallButton(label)` | same | Identical contract. |
 | `Checkbox(label, v)` | `ImGui::Checkbox(label, bool* v)` | Returns `newValue, changed` instead of mutating `v`. |
+| `RadioButton(label, active)` | `ImGui::RadioButton(label, active)` | Same bool form (there's no `int* v, v_button` overload) — returns `pressed`; you decide what "select this one" means, exactly like `Selectable`. |
 | `SliderFloat(label, v, min, max)` | `ImGui::SliderFloat(label, float* v, min, max, fmt, flags)` | Returns `newValue, changed`; fixed `%.3f` display; no format/flags/ctrl-click-to-type. Chosen over `DragFloat` because a bounded slider is what tuning panels want. |
+| `SliderInt(label, v, min, max)` | `ImGui::SliderInt(label, int* v, min, max, fmt, flags)` | Same deviations as `SliderFloat`; fixed `%d` display. |
+| `DragFloat(label, v, speed, min, max)` | `ImGui::DragFloat(label, float* v, speed, min, max, fmt, flags)` | Returns `newValue, changed`; fixed `%.3f` display, no format/flags/ctrl-click-to-type. `min`/`max` are independently optional (nil = unbounded on that side) instead of ImGui's `0, 0` "no bound" sentinel. Implemented with a drag-anchor (captures value + mouse x when the drag begins) rather than ImGui's internal per-frame accumulator — same externally-visible behavior: a click alone never changes the value. |
+| `DragInt(label, v, speed, min, max)` | `ImGui::DragInt(label, int* v, speed, min, max, fmt, flags)` | Same deviations as `DragFloat`; `speed` defaults to `1`; fixed `%d` display. |
+| `ProgressBar(fraction, w, h, overlay)` | `ImGui::ProgressBar(fraction, size, overlay)` | `w, h` instead of an `ImVec2 size`; `overlay` defaults to a centered `"NN%"` string instead of ImGui's `NULL` (which shows nothing). |
 | `TreeNode(label)` / `TreePop()` | same | Identical contract, including the implicit ID push while open. |
+| `CollapsingHeader(label)` | `ImGui::CollapsingHeader(label, flags)` | Returns just `open` (no `p_open`/close-button form). Simplified relative to real ImGui: always full-width, no indent, and — unlike `TreeNode` — no ID-stack push, so no matching `TreePop()`. |
 | `Selectable(label, selected)` | `ImGui::Selectable(label, selected)` | No size/flags. |
-| `Separator()` / `SameLine()` | same | `SameLine()` takes no offset/spacing arguments. |
+| `Separator()` | same | Identical contract. |
+| `Spacing()` / `NewLine()` / `Dummy(w, h)` | same | Identical contracts. |
+| `Indent(w)` / `Unindent(w)` | `ImGui::Indent(w)` / `ImGui::Unindent(w)` | Identical contract; `w` defaults to the style's indent, same as ImGui's `0`. |
+| `SameLine(offsetFromStartX, spacing)` | `ImGui::SameLine(offset_from_start_x, spacing)` | Identical contract and defaults; with no arguments, unchanged from v1. |
+| `PlotLines(label, values, scaleMin, scaleMax, w, h, overlay)` | `ImGui::PlotLines(label, values, count, offset, overlay, min, max, size, stride)` | `values` is a plain Lua array (no separate `count`/`stride`/ring-buffer `offset`); `w, h` instead of an `ImVec2 size`; `scaleMin`/`scaleMax` default to nil (auto-range from `values`), matching ImGui's `FLT_MAX` sentinel. |
+| `PlotHistogram(...)` | `ImGui::PlotHistogram(...)` | Same deviations as `PlotLines`. |
 | `PushID(id)` / `PopID()` | same | Accepts strings and numbers. |
 | `"Label##id"` | same | Identical convention, including in window titles. |
 | `GetItemRectMin/Max()` | same | Return `x, y` instead of `ImVec2`. |
+| `IsItemHovered()` / `IsItemActive()` / `IsItemClicked()` | same | Identical contracts; also well-defined for non-interactive items like `Text()` (`IsItemHovered` is geometric there; `IsItemActive`/`IsItemClicked` are always `false`). |
 
 ## Other deviations worth knowing
 

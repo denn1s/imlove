@@ -14,6 +14,7 @@ package.path = here .. "/?.lua;" .. here .. "/../?.lua;" .. package.path
 local files = {
   "test_require",  -- must run first: it checks behavior with no `love` global
   "test_widgets",
+  "test_widgets_v11",
   "test_ids",
   "test_windows",
   "test_capture",

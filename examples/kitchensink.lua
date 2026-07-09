@@ -89,35 +89,98 @@ local gallery = {
   value = 0.5,
   fruit = 2,
   fruits = { "apple", "banana", "cherry" },
+  sliderInt = 5,
+  dragFloat = 1.0,
+  dragInt = 0,
+  mode = "walk",
+  frameTimes = {},
 }
 
+-- A rolling buffer of frame times, the canonical PlotLines() feed. Capped so
+-- the plot always shows the same time window regardless of framerate.
+local FRAME_HISTORY = 90
+
+local function pushFrameTime()
+  local dt = love.timer.getDelta()
+  local t = gallery.frameTimes
+  t[#t + 1] = dt
+  if #t > FRAME_HISTORY then table.remove(t, 1) end
+end
+
 local function widgetGallery()
+  pushFrameTime()
   imlove.SetNextWindowPos(20, 20, "once")
   if imlove.Begin("Widget gallery") then
-    imlove.Text("Every imlove widget, once.")
-    imlove.Text("FPS: %d", love.timer.getFPS())
+    imlove.Text("Every imlove widget, at least once.")
+    imlove.TextColored({ 0.4, 0.9, 1, 1 }, "FPS: %d", love.timer.getFPS())
+    imlove.TextDisabled("(drag/click anything below)")
+    imlove.TextWrapped("TextWrapped reflows to the window's width, which is " ..
+      "handy for changelogs, tooltips, or any prose too long for a single " ..
+      "Text() line.")
     imlove.Separator()
 
     if imlove.Button("Click me") then
       gallery.clicks = gallery.clicks + 1
     end
     imlove.SameLine()
+    if imlove.SmallButton("reset") then
+      gallery.clicks = 0
+    end
+    imlove.SameLine(nil, 20) -- a wider-than-default gap before the count
     imlove.Text("clicked %d times", gallery.clicks)
+    if imlove.IsItemHovered() then
+      imlove.SameLine()
+      imlove.TextDisabled("(hovered)")
+    end
 
     gallery.checked = imlove.Checkbox("A checkbox", gallery.checked)
     gallery.value = imlove.SliderFloat("a slider", gallery.value, 0, 1)
+    gallery.sliderInt = imlove.SliderInt("an int slider", gallery.sliderInt,
+      0, 10)
+    gallery.dragFloat = imlove.DragFloat("drag float", gallery.dragFloat,
+      0.02, 0, 5)
+    gallery.dragInt = imlove.DragInt("drag int", gallery.dragInt, 1, -10, 10)
+    imlove.ProgressBar(gallery.value)
 
-    if imlove.TreeNode("A tree node") then
-      imlove.Text("Nodes indent children and\nremember being open.")
-      if imlove.TreeNode("Selectables") then
-        for i, name in ipairs(gallery.fruits) do
-          if imlove.Selectable(name, gallery.fruit == i) then
-            gallery.fruit = i
+    imlove.Spacing()
+    imlove.Text("Movement mode:")
+    -- SameLine(offset) lines the group up at fixed columns, regardless of
+    -- how wide each radio button's label is.
+    imlove.SameLine(120)
+    if imlove.RadioButton("walk", gallery.mode == "walk") then
+      gallery.mode = "walk"
+    end
+    imlove.SameLine(200)
+    if imlove.RadioButton("run", gallery.mode == "run") then
+      gallery.mode = "run"
+    end
+    imlove.SameLine(280)
+    if imlove.RadioButton("fly", gallery.mode == "fly") then
+      gallery.mode = "fly"
+    end
+
+    imlove.Spacing()
+    imlove.PlotLines("frame time", gallery.frameTimes, 0, 1 / 30, nil, nil,
+      string.format("%.1f ms", love.timer.getDelta() * 1000))
+
+    if imlove.CollapsingHeader("Layout & tree widgets") then
+      imlove.Indent()
+      imlove.BulletText("Indent()/Unindent() shift the cursor, no ID push.")
+      imlove.Dummy(0, 8) -- a hand-sized gap, instead of Spacing()'s fixed one
+
+      if imlove.TreeNode("A tree node") then
+        imlove.Text("Nodes indent children and\nremember being open.")
+        if imlove.TreeNode("Selectables") then
+          for i, name in ipairs(gallery.fruits) do
+            if imlove.Selectable(name, gallery.fruit == i) then
+              gallery.fruit = i
+            end
           end
+          imlove.TreePop()
         end
         imlove.TreePop()
       end
-      imlove.TreePop()
+      imlove.Unindent()
     end
 
     imlove.Separator()
@@ -156,7 +219,7 @@ local function entityInspector()
 end
 
 local function worldControls()
-  imlove.SetNextWindowPos(20, 420, "once")
+  imlove.SetNextWindowPos(560, 260, "once")
   if imlove.Begin("World") then
     world.paused = imlove.Checkbox("Paused", world.paused)
     world.timescale = imlove.SliderFloat("time scale", world.timescale, 0, 3)

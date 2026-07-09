@@ -12,6 +12,32 @@ local stub = { mouseX = 0, mouseY = 0, calls = {} }
 local font = {}
 function font:getWidth(text) return #tostring(text) * 7 end
 function font:getHeight() return 14 end
+-- A minimal stand-in for LÖVE's Font:getWrap(text, wraplimit): greedy word
+-- wrap using the same fixed 7px-per-character metric as getWidth, one
+-- output line per paragraph (existing "\n"s always break). Returns width,
+-- wrappedLines — same shape as the real thing (width, table).
+function font:getWrap(text, wraplimit)
+  local lines = {}
+  for paragraph in (text .. "\n"):gmatch("(.-)\n") do
+    local cur = ""
+    for word in paragraph:gmatch("%S+") do
+      local candidate = cur == "" and word or (cur .. " " .. word)
+      if cur == "" or #candidate * 7 <= wraplimit then
+        cur = candidate
+      else
+        lines[#lines + 1] = cur
+        cur = word
+      end
+    end
+    lines[#lines + 1] = cur
+  end
+  local maxW = 0
+  for _, line in ipairs(lines) do
+    local w = #line * 7
+    if w > maxW then maxW = w end
+  end
+  return maxW, lines
+end
 stub.font = font
 
 -- (Re)define the global `love`. Called by the harness before every test so
@@ -31,6 +57,7 @@ function stub.install()
       rectangle = record("rectangle"),
       polygon   = record("polygon"),
       line      = record("line"),
+      circle    = record("circle"),
       print     = record("print"),
     },
     mouse = {

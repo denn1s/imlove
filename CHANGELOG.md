@@ -7,6 +7,43 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+## [1.1.0] - 2026-07-09
+
+More widgets, zero new machinery — everything below reuses the existing
+`behavior()` + `itemAdd()` core as-is.
+
+### Added
+
+- `SliderInt(label, value, min, max)` — the integer counterpart of
+  `SliderFloat`, stepped and displayed as `"%d"`.
+- `DragFloat(label, value, speed, min, max)` and `DragInt(label, value,
+  speed, min, max)` — click-and-drag horizontally to change a value by
+  `speed` per pixel instead of mapping a fixed range, ImGui's unbounded
+  workhorse editors. `min`/`max` are independently optional.
+- `RadioButton(label, active)` — a circular Selectable; returns `pressed`,
+  you own the selection, same as `Selectable`.
+- `ProgressBar(fraction, w, h, overlay)` — a fill bar with a centered
+  percentage overlay by default.
+- `CollapsingHeader(label)` — like `TreeNode` but full-width, framed, no
+  indent, and no ID-stack push (no matching `TreePop()`). The go-to widget
+  for organizing a debug panel.
+- Text variants: `TextColored`, `TextDisabled`, `TextWrapped` (word-wraps to
+  the window's available width), `BulletText`.
+- Layout fillers: `Spacing()`, `NewLine()`, `Indent(w)`/`Unindent(w)`,
+  `Dummy(w, h)`; `SameLine()` gained optional `offsetFromStartX`/`spacing`
+  arguments (the no-arg form is unchanged).
+- Item queries: `IsItemHovered()`, `IsItemActive()`, `IsItemClicked()` —
+  work for non-interactive items too (e.g. `Text()`'s hover is computed from
+  its rectangle).
+- `Button(label, w, h)` gained optional explicit size arguments (0/nil still
+  auto-sizes, per axis); `SmallButton(label)` — a button with no vertical
+  frame padding, for inline use.
+- `PlotLines`/`PlotHistogram(label, values, scaleMin, scaleMax, w, h,
+  overlay)` — the canonical FPS/frame-time graph, with auto-ranging when
+  `scaleMin`/`scaleMax` are nil.
+- A `circle` draw-list primitive (used by `RadioButton` and `BulletText`).
+- 37 new headless tests covering every widget above (`tests/test_widgets_v11.lua`).
+
 ## [1.0.1] - 2026-07-09
 
 ### Fixed

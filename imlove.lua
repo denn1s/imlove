@@ -37,7 +37,7 @@ Two classic IMGUI idioms show up throughout, worth knowing:
 MIT License — see LICENSE.
 ------------------------------------------------------------------------------]]
 
-local imlove = { _VERSION = "1.0.0" }
+local imlove = { _VERSION = "1.1.0" }
 
 -- io mirrors Dear ImGui's ImGuiIO flags. After NewFrame() these tell the host
 -- game whether the UI wants the mouse/keyboard this frame, so the game can
@@ -83,6 +83,7 @@ local style = {
     header           = { 0.26, 0.59, 0.98, 0.31 }, -- selected Selectable
     headerHovered    = { 0.26, 0.59, 0.98, 0.55 },
     separator        = { 0.43, 0.43, 0.50, 0.50 },
+    textDisabled     = { 0.50, 0.50, 0.50, 1.00 },
   },
 }
 
@@ -108,7 +109,8 @@ local ctx = {
   hoveredId = nil,     -- id of the widget under the mouse this frame, if any
   dragWindow = nil,    -- window being dragged by its title bar, if any
 
-  openNodes = {},      -- TreeNode id -> true while open (persists over frames)
+  openNodes = {},      -- TreeNode/CollapsingHeader id -> true while open
+  dragAnchor = nil,    -- { id, x, value } drag origin for DragFloat/DragInt
 
   -- Mouse state. LÖVE delivers presses/releases as events between frames, so
   -- the forwarding functions only *latch* them here; NewFrame() converts each
@@ -197,6 +199,11 @@ end
 local function pushLine(win, x1, y1, x2, y2, color)
   win.drawList[#win.drawList + 1] = { kind = "line", color = color,
     x1 = x1, y1 = y1, x2 = x2, y2 = y2 }
+end
+
+local function pushCircle(win, mode, x, y, r, color)
+  win.drawList[#win.drawList + 1] = { kind = "circle", mode = mode,
+    x = x, y = y, r = r, color = color }
 end
 
 --------------------------------------------------------------------------------
@@ -293,6 +300,29 @@ local function itemAdd(win, w, h)
   return x, y
 end
 
+-- Stashes the just-placed item's interactive state so IsItemHovered() /
+-- IsItemActive() / IsItemClicked() can answer without every call site
+-- re-deriving it. "clicked" means the widget's own notion of a completed
+-- click (what it returns as pressed/changed), not merely a mouse-down.
+local function recordItem(win, hovered, active, clicked)
+  win.prevItem.hovered = hovered
+  win.prevItem.active  = active
+  win.prevItem.clicked = clicked
+end
+
+-- Same as itemAdd(), for widgets with no behavior() of their own (Text and
+-- friends, Separator, Dummy, ...). They still report IsItemHovered() from
+-- geometry alone, gated the same way behavior() gates hovered: only the
+-- front window, only while no other widget is held.
+local function itemAddPassive(win, w, h)
+  local x, y = itemAdd(win, w, h)
+  local hovered = ctx.hoveredWindow == win and ctx.dragWindow == nil
+    and ctx.activeId == nil
+    and pointIn(ctx.mouse.x, ctx.mouse.y, x, y, w, h)
+  recordItem(win, hovered, false, false)
+  return x, y
+end
+
 -- Width available for widgets that stretch across the window (Selectable,
 -- Separator). Uses last frame's window width — the one-frame lag again.
 local function availWidth(win)
@@ -380,6 +410,8 @@ function imlove.Render()
           g.polygon("fill", c.x1, c.y1, c.x2, c.y2, c.x3, c.y3)
         elseif c.kind == "line" then
           g.line(c.x1, c.y1, c.x2, c.y2)
+        elseif c.kind == "circle" then
+          g.circle(c.mode, c.x, c.y, c.r)
         end
       end
     end
@@ -498,7 +530,8 @@ function imlove.Begin(title)
   win.nextY = win.y + win.titleH + pad
   win.lineY, win.lineH = win.nextY, 0
   win.sameLineX = nil
-  win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0 }
+  win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0,
+    hovered = false, active = false, clicked = false }
   win.contentMaxX = win.x + ah + 2 + ctx.font:getWidth(displayTitle) + fpx
   win.contentMaxY = win.y + win.titleH
 
@@ -567,27 +600,110 @@ function imlove.Text(fmt, ...)
   local text = tostring(fmt)
   if select("#", ...) > 0 then text = string.format(text, ...) end
   local w, h = textSize(text)
-  local x, y = itemAdd(win, w, h)
+  local x, y = itemAddPassive(win, w, h)
   pushText(win, text, x, y, style.colors.text)
 end
 
+--- Static text drawn in an explicit color instead of the theme's default,
+--- e.g. imlove.TextColored({1, 0.4, 0.4, 1}, "low health!"). Extra arguments
+--- go through string.format like Text(). Equivalent of ImGui::TextColored().
+function imlove.TextColored(color, fmt, ...)
+  local win = requireWindow("TextColored")
+  if win.skipItems then return end
+  local text = tostring(fmt)
+  if select("#", ...) > 0 then text = string.format(text, ...) end
+  local w, h = textSize(text)
+  local x, y = itemAddPassive(win, w, h)
+  pushText(win, text, x, y, color)
+end
+
+--- Static text dimmed to a muted gray, for de-emphasized captions or
+--- placeholders. Equivalent of ImGui::TextDisabled().
+function imlove.TextDisabled(fmt, ...)
+  local win = requireWindow("TextDisabled")
+  if win.skipItems then return end
+  local text = tostring(fmt)
+  if select("#", ...) > 0 then text = string.format(text, ...) end
+  local w, h = textSize(text)
+  local x, y = itemAddPassive(win, w, h)
+  pushText(win, text, x, y, style.colors.textDisabled)
+end
+
+--- Static text that word-wraps to the window's available content width
+--- (as of last frame — the usual one-frame lag; see availWidth()).
+--- Equivalent of ImGui::TextWrapped().
+function imlove.TextWrapped(fmt, ...)
+  local win = requireWindow("TextWrapped")
+  if win.skipItems then return end
+  local text = tostring(fmt)
+  if select("#", ...) > 0 then text = string.format(text, ...) end
+  local wrapW = math.max(availWidth(win), 1)
+  local _, wrapped = ctx.font:getWrap(text, wrapW)
+  text = table.concat(wrapped, "\n")
+  local w, h = textSize(text)
+  local x, y = itemAddPassive(win, w, h)
+  pushText(win, text, x, y, style.colors.text)
+end
+
+--- Static text prefixed with a small filled bullet, for flat lists of facts
+--- that don't need a full TreeNode. Equivalent of ImGui::BulletText().
+function imlove.BulletText(fmt, ...)
+  local win = requireWindow("BulletText")
+  if win.skipItems then return end
+  local text = tostring(fmt)
+  if select("#", ...) > 0 then text = string.format(text, ...) end
+  local fontH = ctx.font:getHeight()
+  local bulletW = fontH * 0.6
+  local tw, th = textSize(text)
+  local w = bulletW + style.innerSpacing + tw
+  local x, y = itemAddPassive(win, w, th)
+  pushCircle(win, "fill", x + bulletW * 0.5, y + th * 0.5, fontH * 0.15,
+    style.colors.text)
+  pushText(win, text, x + bulletW + style.innerSpacing, y, style.colors.text)
+end
+
 --- A push button. Returns true on the frame it is clicked (mouse released
---- over it). Equivalent of ImGui::Button().
-function imlove.Button(label)
+--- over it). w/h are optional explicit sizes; 0 or nil on either axis means
+--- "auto-size to the label" on that axis, same as ImGui's ImVec2(0, 0).
+--- Equivalent of ImGui::Button().
+function imlove.Button(label, w, h)
   local win = requireWindow("Button")
   if win.skipItems then return false end
   local display, idText = splitLabel(label)
   local id = makeId(idText)
   local fpx, fpy = style.framePadding[1], style.framePadding[2]
   local tw, th = textSize(display)
-  local w, h = tw + fpx * 2, th + fpy * 2
+  w = (w and w > 0) and w or tw + fpx * 2
+  h = (h and h > 0) and h or th + fpy * 2
   local x, y = itemAdd(win, w, h)
   local hovered, held, pressed = behavior(win, id, x, y, w, h)
+  recordItem(win, hovered, held, pressed)
   local color = held and style.colors.buttonActive
     or hovered and style.colors.buttonHovered
     or style.colors.button
   pushRect(win, "fill", x, y, w, h, color, style.rounding)
-  pushText(win, display, x + fpx, y + fpy, style.colors.text)
+  pushText(win, display, x + (w - tw) / 2, y + (h - th) / 2, style.colors.text)
+  return pressed
+end
+
+--- A push button with no vertical frame padding, for placing a button
+--- inline with a line of text. Equivalent of ImGui::SmallButton().
+function imlove.SmallButton(label)
+  local win = requireWindow("SmallButton")
+  if win.skipItems then return false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx = style.framePadding[1]
+  local tw, th = textSize(display)
+  local w, h = tw + fpx * 2, th
+  local x, y = itemAdd(win, w, h)
+  local hovered, held, pressed = behavior(win, id, x, y, w, h)
+  recordItem(win, hovered, held, pressed)
+  local color = held and style.colors.buttonActive
+    or hovered and style.colors.buttonHovered
+    or style.colors.button
+  pushRect(win, "fill", x, y, w, h, color, style.rounding)
+  pushText(win, display, x + fpx, y, style.colors.text)
   return pressed
 end
 
@@ -606,6 +722,7 @@ function imlove.Checkbox(label, value)
   local w = box + style.innerSpacing + tw
   local x, y = itemAdd(win, w, box)
   local hovered, held, pressed = behavior(win, id, x, y, w, box)
+  recordItem(win, hovered, held, pressed)
   if pressed then value = not value end
   local bg = held and style.colors.frameBgActive
     or hovered and style.colors.frameBgHovered
@@ -619,6 +736,41 @@ function imlove.Checkbox(label, value)
   pushText(win, display, x + box + style.innerSpacing, y + fpy,
     style.colors.text)
   return value, pressed
+end
+
+--- A radio button: a circular Selectable. Pass whether it is the currently
+--- chosen option (it draws with a filled dot); returns true on the frame it
+--- is clicked — switching the selection is up to you, exactly like
+--- Selectable():
+---
+---   if imlove.RadioButton("Easy", difficulty == "easy") then
+---     difficulty = "easy"
+---   end
+---
+--- Equivalent of ImGui::RadioButton(label, active).
+function imlove.RadioButton(label, active)
+  local win = requireWindow("RadioButton")
+  if win.skipItems then return false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpy = style.framePadding[2]
+  local box = ctx.font:getHeight() + fpy * 2
+  local tw = ctx.font:getWidth(display)
+  local w = box + style.innerSpacing + tw
+  local x, y = itemAdd(win, w, box)
+  local hovered, held, pressed = behavior(win, id, x, y, w, box)
+  recordItem(win, hovered, held, pressed)
+  local cx, cy, r = x + box * 0.5, y + box * 0.5, box * 0.5 - 1
+  local bg = held and style.colors.frameBgActive
+    or hovered and style.colors.frameBgHovered
+    or style.colors.frameBg
+  pushCircle(win, "fill", cx, cy, r, bg)
+  if active then
+    pushCircle(win, "fill", cx, cy, r * 0.5, style.colors.checkMark)
+  end
+  pushText(win, display, x + box + style.innerSpacing, y + fpy,
+    style.colors.text)
+  return pressed
 end
 
 --- A horizontal slider for a float. Click or drag anywhere on the track to
@@ -637,6 +789,7 @@ function imlove.SliderFloat(label, value, min, max)
   local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
   local x, y = itemAdd(win, totalW, h)
   local hovered, held = behavior(win, id, x, y, trackW, h)
+  recordItem(win, hovered, held, false)
 
   local old = value
   if held then
@@ -666,6 +819,176 @@ function imlove.SliderFloat(label, value, min, max)
   return value, value ~= old
 end
 
+--- A horizontal slider for an integer, stepped and displayed as "%d". Same
+--- click/drag/return contract as SliderFloat(). Equivalent of
+--- ImGui::SliderInt().
+function imlove.SliderInt(label, value, min, max)
+  local win = requireWindow("SliderInt")
+  value = math.floor(tonumber(value) or min)
+  if win.skipItems then return value, false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local trackW, h = style.sliderWidth, frameHeight()
+  local tw = ctx.font:getWidth(display)
+  local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local hovered, held = behavior(win, id, x, y, trackW, h)
+  recordItem(win, hovered, held, false)
+
+  local old = value
+  if held then
+    local t = clamp((ctx.mouse.x - x) / trackW, 0, 1)
+    value = min + t * (max - min)
+  end
+  value = clamp(value, math.min(min, max), math.max(min, max))
+  value = math.floor(value + 0.5)
+
+  local bg = held and style.colors.frameBgActive
+    or hovered and style.colors.frameBgHovered
+    or style.colors.frameBg
+  pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
+  local range = max - min
+  local t = range ~= 0 and clamp((value - min) / range, 0, 1) or 0
+  local grabW = style.grabWidth
+  pushRect(win, "fill", x + 2 + t * (trackW - grabW - 4), y + 2,
+    grabW, h - 4, held and style.colors.sliderGrabActive
+    or style.colors.sliderGrab, style.rounding)
+  local valueText = string.format("%d", value)
+  pushText(win, valueText,
+    x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
+    style.colors.text)
+  if tw > 0 then
+    pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
+      style.colors.text)
+  end
+  return value, value ~= old
+end
+
+-- Shared drag math for DragFloat/DragInt: while held, the value tracks
+-- horizontal mouse movement scaled by speed, anchored to the value and
+-- mouse position captured the frame the drag began. Anchoring (rather than
+-- accumulating a per-frame delta) means the value can never drift from
+-- rounding error, and a click that doesn't move the mouse changes nothing —
+-- unlike SliderFloat, a Drag widget never "jumps" to a clicked position.
+local function dragValue(id, held, value, speed, min, max)
+  if held then
+    local anchor = ctx.dragAnchor
+    if not anchor or anchor.id ~= id then
+      anchor = { id = id, x = ctx.mouse.x, value = value }
+      ctx.dragAnchor = anchor
+    end
+    value = anchor.value + (ctx.mouse.x - anchor.x) * speed
+    if min and max then
+      value = clamp(value, math.min(min, max), math.max(min, max))
+    elseif min then
+      value = math.max(value, min)
+    elseif max then
+      value = math.min(value, max)
+    end
+  elseif ctx.dragAnchor and ctx.dragAnchor.id == id then
+    ctx.dragAnchor = nil
+  end
+  return value
+end
+
+--- An unbounded (by default) float editor: click and drag horizontally to
+--- change the value by speed per pixel, instead of mapping the whole track
+--- to a fixed range like SliderFloat. min/max are optional — nil means
+--- unbounded on that side (ImGui uses a 0, 0 sentinel for this; Lua just
+--- omits the argument). speed defaults to 1.0, ImGui's default. Returns
+--- value, changed like every other value widget. Equivalent of
+--- ImGui::DragFloat().
+function imlove.DragFloat(label, value, speed, min, max)
+  local win = requireWindow("DragFloat")
+  value = tonumber(value) or 0
+  if win.skipItems then return value, false end
+  speed = speed or 1.0
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local trackW, h = style.sliderWidth, frameHeight()
+  local tw = ctx.font:getWidth(display)
+  local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local hovered, held = behavior(win, id, x, y, trackW, h)
+  recordItem(win, hovered, held, false)
+
+  local old = value
+  value = dragValue(id, held, value, speed, min, max)
+
+  local bg = held and style.colors.frameBgActive
+    or hovered and style.colors.frameBgHovered
+    or style.colors.frameBg
+  pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
+  local valueText = string.format("%.3f", value)
+  pushText(win, valueText,
+    x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
+    style.colors.text)
+  if tw > 0 then
+    pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
+      style.colors.text)
+  end
+  return value, value ~= old
+end
+
+--- The integer counterpart of DragFloat(): speed defaults to 1, and the
+--- value is rounded to the nearest integer. Equivalent of ImGui::DragInt().
+function imlove.DragInt(label, value, speed, min, max)
+  local win = requireWindow("DragInt")
+  value = math.floor(tonumber(value) or 0)
+  if win.skipItems then return value, false end
+  speed = speed or 1
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local trackW, h = style.sliderWidth, frameHeight()
+  local tw = ctx.font:getWidth(display)
+  local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local hovered, held = behavior(win, id, x, y, trackW, h)
+  recordItem(win, hovered, held, false)
+
+  local old = value
+  value = math.floor(dragValue(id, held, value, speed, min, max) + 0.5)
+
+  local bg = held and style.colors.frameBgActive
+    or hovered and style.colors.frameBgHovered
+    or style.colors.frameBg
+  pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
+  local valueText = string.format("%d", value)
+  pushText(win, valueText,
+    x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
+    style.colors.text)
+  if tw > 0 then
+    pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
+      style.colors.text)
+  end
+  return value, value ~= old
+end
+
+--- A progress bar filled to fraction (clamped to 0..1). w/h default to the
+--- slider width and frame height; overlay defaults to a centered "NN%"
+--- label, or pass your own string. Equivalent of ImGui::ProgressBar().
+function imlove.ProgressBar(fraction, w, h, overlay)
+  local win = requireWindow("ProgressBar")
+  fraction = clamp(tonumber(fraction) or 0, 0, 1)
+  if win.skipItems then return end
+  w = (w and w > 0) and w or style.sliderWidth
+  h = (h and h > 0) and h or frameHeight()
+  local x, y = itemAddPassive(win, w, h)
+  pushRect(win, "fill", x, y, w, h, style.colors.frameBg, style.rounding)
+  if fraction > 0 then
+    pushRect(win, "fill", x, y, w * fraction, h, style.colors.sliderGrab,
+      style.rounding)
+  end
+  local text = overlay or string.format("%d%%",
+    math.floor(fraction * 100 + 0.5))
+  local tw = ctx.font:getWidth(text)
+  pushText(win, text, x + (w - tw) / 2, y + style.framePadding[2],
+    style.colors.text)
+end
+
 --- A collapsible tree node. Returns whether it is open; when it is, its
 --- children follow indented, and you MUST call TreePop() after them:
 ---
@@ -689,6 +1012,7 @@ function imlove.TreeNode(label)
   local w = arrow + style.innerSpacing + ctx.font:getWidth(display)
   local x, y = itemAdd(win, w, h)
   local hovered, held, pressed = behavior(win, id, x, y, w, h)
+  recordItem(win, hovered, held, pressed)
   if pressed then
     open = not open
     ctx.openNodes[id] = open
@@ -727,6 +1051,52 @@ function imlove.TreePop()
   win.indent = win.indent - style.indent
 end
 
+--- A full-width framed header, for organizing a debug panel into sections.
+--- Unlike TreeNode(), it doesn't indent its content and doesn't push
+--- anything onto the ID stack, and there is no matching "Pop" call — put
+--- your following widgets directly under it:
+---
+---   if imlove.CollapsingHeader("Rendering") then
+---     imlove.Text("...")
+---   end
+---
+--- Open state persists across frames, keyed like every other widget id.
+--- Equivalent of ImGui::CollapsingHeader().
+function imlove.CollapsingHeader(label)
+  local win = requireWindow("CollapsingHeader")
+  if win.skipItems then return false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local open = ctx.openNodes[id] == true
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local h = frameHeight()
+  local arrow = ctx.font:getHeight()
+  local w = math.max(availWidth(win),
+    arrow + style.innerSpacing + ctx.font:getWidth(display) + fpx * 2)
+  local x, y = itemAdd(win, w, h)
+  local hovered, held, pressed = behavior(win, id, x, y, w, h)
+  recordItem(win, hovered, held, pressed)
+  if pressed then
+    open = not open
+    ctx.openNodes[id] = open
+  end
+  local bg = held and style.colors.frameBgActive
+    or hovered and style.colors.headerHovered
+    or style.colors.frameBg
+  pushRect(win, "fill", x, y, w, h, bg, style.rounding)
+  local cx, cy, r = x + fpx + arrow * 0.5, y + h * 0.5, arrow * 0.3
+  if open then
+    pushTriangle(win, cx - r, cy - r * 0.6, cx + r, cy - r * 0.6,
+      cx, cy + r, style.colors.text)
+  else
+    pushTriangle(win, cx - r * 0.6, cy - r, cx - r * 0.6, cy + r,
+      cx + r, cy, style.colors.text)
+  end
+  pushText(win, display, x + fpx + arrow + style.innerSpacing, y + fpy,
+    style.colors.text)
+  return open
+end
+
 --- A selectable row spanning the window width, for pick-one-from-a-list UIs.
 --- Pass whether this row is currently selected (it draws highlighted);
 --- returns true on the frame it is clicked — updating your selection is up
@@ -746,6 +1116,7 @@ function imlove.Selectable(label, selected)
   local h = frameHeight()
   local x, y = itemAdd(win, w, h)
   local hovered, held, pressed = behavior(win, id, x, y, w, h)
+  recordItem(win, hovered, held, pressed)
   if hovered or held then
     pushRect(win, "fill", x, y, w, h, style.colors.headerHovered,
       style.rounding)
@@ -761,16 +1132,162 @@ function imlove.Separator()
   local win = requireWindow("Separator")
   if win.skipItems then return end
   local w = math.max(availWidth(win), 1)
-  local x, y = itemAdd(win, w, 1)
+  local x, y = itemAddPassive(win, w, 1)
   pushLine(win, x, y + 0.5, x + w, y + 0.5, style.colors.separator)
 end
 
+--- A blank vertical gap the size of one item spacing. Equivalent of
+--- ImGui::Spacing().
+function imlove.Spacing()
+  local win = requireWindow("Spacing")
+  if win.skipItems then return end
+  itemAddPassive(win, 0, 0)
+end
+
+--- Forces the next widget onto a new row, even right after SameLine().
+--- Equivalent of ImGui::NewLine().
+function imlove.NewLine()
+  local win = requireWindow("NewLine")
+  if win.skipItems then return end
+  win.sameLineX = nil -- cancel any pending SameLine(): really start a row
+  itemAddPassive(win, 0, ctx.font:getHeight())
+end
+
+--- Reserves a w x h blank rectangle in the layout — a spacer, or a stand-in
+--- for a widget you draw yourself. Equivalent of ImGui::Dummy().
+function imlove.Dummy(w, h)
+  local win = requireWindow("Dummy")
+  if win.skipItems then return end
+  itemAddPassive(win, w, h)
+end
+
+--- Shifts every following widget in this window right by w (default:
+--- style's indent). Call Unindent() with the same w to undo it — unlike
+--- TreeNode(), this is a plain cursor shift with no ID stack involved, so it
+--- nests however you call it. Equivalent of ImGui::Indent().
+function imlove.Indent(w)
+  local win = requireWindow("Indent")
+  if win.skipItems then return end
+  win.indent = win.indent + ((w and w ~= 0) and w or style.indent)
+end
+
+--- Undoes Indent(w). Equivalent of ImGui::Unindent().
+function imlove.Unindent(w)
+  local win = requireWindow("Unindent")
+  if win.skipItems then return end
+  win.indent = win.indent - ((w and w ~= 0) and w or style.indent)
+end
+
 --- Place the next widget on the same line as the previous one instead of
---- below it. Equivalent of ImGui::SameLine().
-function imlove.SameLine()
+--- below it. With no arguments, continues right after the previous item
+--- plus one item spacing — the v1 behavior. offsetFromStartX, if non-zero,
+--- instead places it at that x offset from the window's content start
+--- (handy for aligning a column of trailing widgets). spacing, if given,
+--- overrides the default item-spacing gap. Equivalent of ImGui::SameLine().
+function imlove.SameLine(offsetFromStartX, spacing)
   local win = requireWindow("SameLine")
   if win.skipItems then return end
-  win.sameLineX = win.prevItem.x + win.prevItem.w + style.itemSpacing[1]
+  if offsetFromStartX and offsetFromStartX ~= 0 then
+    win.sameLineX = win.innerX + win.indent + offsetFromStartX
+  else
+    win.sameLineX = win.prevItem.x + win.prevItem.w
+      + (spacing or style.itemSpacing[1])
+  end
+end
+
+-- Auto-range for PlotLines/PlotHistogram when scaleMin/scaleMax are nil:
+-- the min/max of the sampled values, like ImGui's FLT_MAX sentinel does.
+local function autoRange(values)
+  local lo, hi = math.huge, -math.huge
+  for i = 1, #values do
+    local v = values[i]
+    if v < lo then lo = v end
+    if v > hi then hi = v end
+  end
+  if lo > hi then lo, hi = 0, 0 end -- no samples: avoid returning +/-inf
+  return lo, hi
+end
+
+-- Shared layout/drawing for PlotLines/PlotHistogram: only the plotted shape
+-- differs between them.
+local function plotWidget(win, kind, label, values, scaleMin, scaleMax,
+    w, h, overlay)
+  local display, idText = splitLabel(label)
+  local fpy = style.framePadding[2]
+  w = (w and w > 0) and w or style.sliderWidth
+  h = (h and h > 0) and h or frameHeight() * 3
+  local tw = ctx.font:getWidth(display)
+  local totalW = w + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAddPassive(win, totalW, h)
+  pushRect(win, "fill", x, y, w, h, style.colors.frameBg, style.rounding)
+
+  local n = #values
+  if n > 0 then
+    local lo = scaleMin
+    local hi = scaleMax
+    if not lo or not hi then
+      local autoLo, autoHi = autoRange(values)
+      lo = lo or autoLo
+      hi = hi or autoHi
+    end
+    local range = hi - lo
+    local function plotY(v)
+      local t = range ~= 0 and clamp((v - lo) / range, 0, 1) or 0.5
+      return y + h - t * h
+    end
+
+    if kind == "lines" then
+      for i = 1, n - 1 do
+        local x1 = x + (i - 1) / (n - 1) * w
+        local x2 = x + i / (n - 1) * w
+        pushLine(win, x1, plotY(values[i]), x2, plotY(values[i + 1]),
+          style.colors.sliderGrab)
+      end
+    else -- "histogram"
+      local barW = w / n
+      for i = 1, n do
+        local bx = x + (i - 1) * barW
+        local by = plotY(values[i])
+        pushRect(win, "fill", bx, by, math.max(barW - 1, 1), y + h - by,
+          style.colors.sliderGrab)
+      end
+    end
+  end
+
+  if overlay then
+    local ow = ctx.font:getWidth(overlay)
+    pushText(win, overlay, x + (w - ow) / 2, y + fpy, style.colors.text)
+  end
+  if tw > 0 then
+    pushText(win, display, x + w + style.innerSpacing,
+      y + (h - ctx.font:getHeight()) / 2, style.colors.text)
+  end
+end
+
+--- A line-graph plot of values (a plain Lua array of numbers), the
+--- canonical "FPS over time" debug widget:
+---
+---   imlove.PlotLines("frame time", history, 0, 0.05)
+---
+--- scaleMin/scaleMax default to the min/max found in values when nil. w/h
+--- default to the slider width and three line-heights. overlay, if given,
+--- is centered on top of the plot (e.g. a current-value readout) instead of
+--- the label, which is drawn to the right like SliderFloat's.
+--- Equivalent of ImGui::PlotLines().
+function imlove.PlotLines(label, values, scaleMin, scaleMax, w, h, overlay)
+  local win = requireWindow("PlotLines")
+  if win.skipItems then return end
+  plotWidget(win, "lines", label, values, scaleMin, scaleMax, w, h, overlay)
+end
+
+--- Same signature and semantics as PlotLines(), drawn as vertical bars
+--- instead of a connected line. Equivalent of ImGui::PlotHistogram().
+function imlove.PlotHistogram(label, values, scaleMin, scaleMax, w, h,
+    overlay)
+  local win = requireWindow("PlotHistogram")
+  if win.skipItems then return end
+  plotWidget(win, "histogram", label, values, scaleMin, scaleMax, w, h,
+    overlay)
 end
 
 --------------------------------------------------------------------------------
@@ -819,6 +1336,31 @@ end
 function imlove.GetItemRectMax()
   local win = requireWindow("GetItemRectMax")
   return win.prevItem.x + win.prevItem.w, win.prevItem.y + win.prevItem.h
+end
+
+--- Was the most recent item hovered by the mouse this frame? Works for any
+--- item, including non-interactive ones like Text() (computed from its
+--- rectangle rather than a stored hot-state). Equivalent of
+--- ImGui::IsItemHovered().
+function imlove.IsItemHovered()
+  local win = requireWindow("IsItemHovered")
+  return win.prevItem.hovered == true
+end
+
+--- Is the most recent item currently held down by the mouse? Always false
+--- for non-interactive items. Equivalent of ImGui::IsItemActive().
+function imlove.IsItemActive()
+  local win = requireWindow("IsItemActive")
+  return win.prevItem.active == true
+end
+
+--- Was the most recent item clicked this frame — its own notion of a
+--- completed click, e.g. Button()'s release-over-it or TreeNode()'s toggle.
+--- Always false for non-interactive items. Equivalent of
+--- ImGui::IsItemClicked().
+function imlove.IsItemClicked()
+  local win = requireWindow("IsItemClicked")
+  return win.prevItem.clicked == true
 end
 
 --------------------------------------------------------------------------------
