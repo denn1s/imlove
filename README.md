@@ -30,6 +30,10 @@ local imlove = require "imlove"
 function love.mousepressed(x, y, button)  imlove.mousepressed(x, y, button)  end
 function love.mousereleased(x, y, button) imlove.mousereleased(x, y, button) end
 function love.wheelmoved(dx, dy)          imlove.wheelmoved(dx, dy)          end
+function love.keypressed(key, scancode, isrepeat)
+  imlove.keypressed(key, scancode, isrepeat)
+end
+function love.textinput(text) imlove.textinput(text) end
 
 function love.update(dt)
   imlove.NewFrame()   -- first imlove call of the frame
@@ -82,9 +86,20 @@ if not imlove.io.WantCaptureMouse and love.mouse.isDown(1) then
 end
 ```
 
-`imlove.io.WantCaptureKeyboard` also exists; it is always `false` in v1
-(there are no keyboard widgets yet) but wiring it now means your integration
-stays correct when text fields arrive.
+`imlove.io.WantCaptureKeyboard` mirrors `WantCaptureMouse` for the keyboard:
+`true` after `NewFrame()` whenever an `InputText`/`InputFloat`/`InputInt` (or
+a ctrl-clicked slider/drag) has keyboard focus. As of v1.4, wiring
+`love.keypressed`/`love.textinput` to `imlove.keypressed`/`imlove.textinput`
+(shown above) is **required** for those widgets to receive any edits at all —
+without them, clicking a text field focuses it but typing does nothing. Guard
+your own key handling the same way you already guard mouse handling:
+
+```lua
+function love.keypressed(key, scancode, isrepeat)
+  if imlove.keypressed(key, scancode, isrepeat) then return end
+  if key == "space" then game:pause() end -- safe: the UI isn't editing text
+end
+```
 
 ### A real example: an entity inspector
 

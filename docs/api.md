@@ -27,13 +27,13 @@ the UI consumed the event (= your game should ignore it).
 | `imlove.mousepressed(x, y, button)` | Required. |
 | `imlove.mousereleased(x, y, button)` | Required. |
 | `imlove.wheelmoved(dx, dy)` | Recommended: scrolls the window or `BeginChild()` region under the mouse, and reports the wheel as consumed over any window so your game doesn't zoom under the UI. |
-| `imlove.keypressed(key)` | Optional in v1 (always returns `false`); wire it for forward compatibility. |
-| `imlove.textinput(text)` | Optional in v1; same story. |
+| `imlove.keypressed(key, scancode, isrepeat)` | **Required as of v1.4** for `InputText`/`InputFloat`/`InputInt` (and ctrl-click-to-type on sliders/drags) to work at all — without it, a focused field can't see Backspace/Delete/arrows/Enter/Escape/Ctrl+C/Ctrl+V. LÖVE calls it with three arguments; the extra two are accepted and ignored. Returns `true` (consumed) whenever any field has keyboard focus, regardless of which key it is — check the return value (or `io.WantCaptureKeyboard`) before your game acts on a key, e.g. before Space pauses it. |
+| `imlove.textinput(text)` | **Required as of v1.4**, same story as `keypressed` — this is what actually delivers typed characters. Returns `true` whenever any field has focus. |
 
 | Flag | Meaning |
 |---|---|
 | `imlove.io.WantCaptureMouse` | After `NewFrame()`: the mouse is over/held by the UI this frame. Unconditionally `true` whenever any popup or modal is open, regardless of mouse position. A tooltip does **not** force this — like ImGui's, it's purely visual and never hit-testable, so showing one has no effect on input capture. |
-| `imlove.io.WantCaptureKeyboard` | Always `false` in v1. |
+| `imlove.io.WantCaptureKeyboard` | After `NewFrame()`: `true` while an `InputText`/`InputFloat`/`InputInt` — or a ctrl-clicked `SliderFloat`/`SliderInt`/`DragFloat`/`DragInt` — holds keyboard focus. `false` whenever nothing does, exactly as in v1-v1.3. |
 
 ### Windows
 
@@ -78,10 +78,10 @@ A window auto-fits its content, exactly like v1.1, until it's given an explicit 
 | `imlove.SmallButton(label)` | `pressed` | A `Button` with no vertical frame padding, for placing inline with a line of text. |
 | `imlove.Checkbox(label, value)` | `value, changed` | Toggles on click. Assign the first return back to your variable. |
 | `imlove.RadioButton(label, active)` | `pressed` | A circular Selectable. Pass whether it's the currently-chosen option (drawn with a filled dot); returns `true` on click. Switching the selection is up to you, same as `Selectable`. |
-| `imlove.SliderFloat(label, value, min, max)` | `value, changed` | Horizontal slider; click or drag anywhere on the track. Assign the first return back. |
-| `imlove.SliderInt(label, value, min, max)` | `value, changed` | Same contract as `SliderFloat`, stepped and displayed as `"%d"`. |
-| `imlove.DragFloat(label, value, speed, min, max)` | `value, changed` | Click-and-drag horizontally to change the value by `speed` per pixel, instead of mapping the whole track to a fixed range. `speed` defaults to `1.0`; `min`/`max` are optional and independently nil-able (unbounded on that side). A click that doesn't move the mouse changes nothing — unlike `SliderFloat`, it never jumps to the clicked position. |
-| `imlove.DragInt(label, value, speed, min, max)` | `value, changed` | The integer counterpart of `DragFloat`; `speed` defaults to `1`, value rounds to the nearest integer. |
+| `imlove.SliderFloat(label, value, min, max)` | `value, changed` | Horizontal slider; click or drag anywhere on the track. Assign the first return back. **Ctrl+click** turns it into a numeric text editor instead — type an exact value; Enter commits it (clamped to `min`/`max`), Escape reverts, clicking elsewhere just stops editing without committing. |
+| `imlove.SliderInt(label, value, min, max)` | `value, changed` | Same contract as `SliderFloat`, stepped and displayed as `"%d"`, including ctrl-click-to-type (the committed value rounds to the nearest integer, same as dragging does). |
+| `imlove.DragFloat(label, value, speed, min, max)` | `value, changed` | Click-and-drag horizontally to change the value by `speed` per pixel, instead of mapping the whole track to a fixed range. `speed` defaults to `1.0`; `min`/`max` are optional and independently nil-able (unbounded on that side). A click that doesn't move the mouse changes nothing — unlike `SliderFloat`, it never jumps to the clicked position. Ctrl+click turns it into a numeric text editor, exactly like `SliderFloat`, clamped only to whichever of `min`/`max` are given. |
+| `imlove.DragInt(label, value, speed, min, max)` | `value, changed` | The integer counterpart of `DragFloat`; `speed` defaults to `1`, value rounds to the nearest integer. Ctrl+click-to-type rounds the same way. |
 | `imlove.ProgressBar(fraction, w, h, overlay)` | — | A bar filled to `fraction` (clamped 0..1). `w`/`h` default to the slider width and frame height; `overlay` defaults to a centered `"NN%"` label. |
 | `imlove.TreeNode(label)` | `open` | Collapsible node; open state persists. When `open`, children are indented and the label is pushed on the ID stack — call `TreePop()` after them. |
 | `imlove.TreePop()` | — | Close the innermost open `TreeNode`. Call once per `TreeNode` that returned `true`. |
@@ -98,6 +98,26 @@ A window auto-fits its content, exactly like v1.1, until it's given an explicit 
 | `imlove.PlotHistogram(label, values, scaleMin, scaleMax, w, h, overlay)` | — | Same signature and semantics as `PlotLines`, drawn as vertical bars instead of a connected line. |
 | `imlove.Combo(label, value, items)` | `value, changed` | A slider-width preview box + arrow; click to open a dropdown of `Selectable`s built from `items` (a plain Lua array — its element order is the display order). **`value` is a 1-based index into `items`**, not a 0-based one — this is a deliberate deviation from ImGui, matching Lua's own array convention; assign the first return back. An out-of-range `value` (including `0` or `nil`) just shows an empty preview instead of erroring. |
 | `imlove.ListBox(label, value, items, heightInItems)` | `value, changed` | An always-visible, scrollable list of `Selectable`s (a thin wrapper over `BeginChild`) — the alternative to `Combo` when you want every option visible without a click. Same 1-based `value` convention as `Combo`. `heightInItems` defaults to `7` visible rows; extra items scroll. |
+
+### Text input
+
+Requires wiring both `imlove.keypressed` and `imlove.textinput` to the
+matching `love.*` callbacks (see "LÖVE callback forwards" above) — without
+both, a focused field can't receive edits at all. A text/numeric field gains
+keyboard focus when clicked, exactly like `activeId` but persistent across
+frames until Enter (commit), Escape (revert), a click outside the field
+(which is **not** consumed — it still reaches whatever it landed on), or the
+field simply not being submitted for a frame (the same staleness rule that
+closes a window/popup whose `Begin()`/`BeginPopup()` stops being called).
+There is no selection in v1.4 — no shift-click, no double-click-to-select,
+no partial copy — a deliberate, documented deviation from ImGui; see
+`docs/imgui.md`.
+
+| Function | Returns | Description |
+|---|---|---|
+| `imlove.InputText(label, text, flags)` | `text, changed` | A single-line text field. By default returns the live edit buffer with `changed = true` on every keystroke — assign it back like any other imlove value. Pass the `"EnterReturnsTrue"` flag for ImGui's other mode: keeps returning the OLD text (`changed = false`) while typing, and returns the new text with `changed = true` only once, the frame Enter commits it. Backspace/Delete/Left/Right/Home/End all work; text scrolls horizontally inside the frame so the cursor stays visible. Ctrl+V pastes at the cursor (`love.system.getClipboardText`); Ctrl+C copies the **whole field** — there's no selection, so no partial copy. `flags` is a string or array of strings. |
+| `imlove.InputFloat(label, value, step)` | `value, changed` | `InputText` restricted to editing a float: the buffer parses on every keystroke — a successful `tonumber()` returns the parsed value with `changed = true`; an unparseable intermediate state (`""`, `"-"`, `"."`, ...) returns the last good value unchanged. Enter commits (parsing, or reverting if it doesn't parse); Escape always reverts. If `step` is given (and nonzero), small "-"/"+" buttons nudge the value by `step` directly, bypassing text parsing entirely — they work even while the field isn't focused. |
+| `imlove.InputInt(label, value, step)` | `value, changed` | The integer counterpart of `InputFloat`: a typed value **floors** on commit (`"3.7"` commits as `3`, not rounds to `4`) — chosen so partial input like `"-"` or `"3."` never round-trips into visible jitter. Same `step` button behavior as `InputFloat`. |
 
 ### Popups & tooltips
 

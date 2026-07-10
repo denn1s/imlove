@@ -77,6 +77,13 @@ local demo = {
   secNoTitleBar = false,
   secNoResize = false,
   secAlwaysAutoResize = false,
+
+  -- "Text input"
+  textValue = "edit me",
+  textEnterValue = "",
+  textEnterLastCommitted = "(nothing yet)",
+  inputFloat = 1.5,
+  inputInt = 3,
 }
 
 local WAVE_HISTORY = 100
@@ -326,6 +333,36 @@ local function showPopups()
   end
 end
 
+-- ------------------------------------------------------------- Text input
+
+local function showTextInput()
+  if imlove.CollapsingHeader("Text input") then
+    imlove.TextDisabled("InputText: framed and focusable; returns the live " ..
+      "buffer, with changed=true on every keystroke.")
+    demo.textValue = imlove.InputText("InputText", demo.textValue)
+    imlove.Text("live value: %s", demo.textValue)
+
+    imlove.Spacing()
+    imlove.TextDisabled("The \"EnterReturnsTrue\" flag: changed only " ..
+      "fires on Enter, not on every keystroke.")
+    local enterChanged
+    demo.textEnterValue, enterChanged = imlove.InputText("InputText (Enter)",
+      demo.textEnterValue, "EnterReturnsTrue")
+    if enterChanged then demo.textEnterLastCommitted = demo.textEnterValue end
+    imlove.Text("last committed: %s", demo.textEnterLastCommitted)
+
+    imlove.Separator()
+    imlove.TextDisabled("InputFloat/InputInt: numeric-restricted " ..
+      "InputText, with optional +/- step buttons.")
+    demo.inputFloat = imlove.InputFloat("InputFloat", demo.inputFloat, 0.1)
+    demo.inputInt = imlove.InputInt("InputInt", demo.inputInt, 1)
+
+    imlove.Separator()
+    imlove.TextDisabled("Ctrl-click any Slider/Drag up in \"Widgets\" to " ..
+      "type an exact value instead of dragging it.")
+  end
+end
+
 -- ----------------------------------------------------------------- Windows
 
 local function showWindows()
@@ -398,6 +435,7 @@ local function ShowDemoWindow(open)
     showLayout()
     showPopups()
     showWindows()
+    showTextInput()
   end
   imlove.End()
 

@@ -7,8 +7,11 @@ record their calls into `stub.calls` instead of drawing, so tests can assert
 on what would have been drawn.
 ]]
 
+-- files: love.filesystem's in-memory backing store, name -> contents.
+-- ctrlDown: love.keyboard.isDown("lctrl"/"rctrl") stub state.
+-- clipboard: love.system.get/setClipboardText's in-memory backing.
 local stub = { mouseX = 0, mouseY = 0, calls = {}, screenW = 800, screenH = 600,
-  files = {} } -- love.filesystem's in-memory backing store: name -> contents
+  files = {}, ctrlDown = false, clipboard = "" }
 
 local font = {}
 function font:getWidth(text) return #tostring(text) * 7 end
@@ -53,6 +56,7 @@ function stub.install()
   -- re-require "imlove" directly instead of going through H.fresh(), so
   -- this store is left untouched — see tests/test_settings.lua.
   stub.files = {}
+  stub.clipboard = ""
   local function record(name)
     return function(...) calls[#calls + 1] = { name, ... } end
   end
@@ -107,6 +111,21 @@ function stub.install()
     mouse = {
       getPosition = function() return stub.mouseX, stub.mouseY end,
     },
+    keyboard = {
+      -- imlove only ever asks about lctrl/rctrl (to detect ctrl-click and
+      -- ctrl+v/ctrl+c); stub.ctrlDown drives both uniformly.
+      isDown = function(...)
+        if not stub.ctrlDown then return false end
+        for _, key in ipairs({ ... }) do
+          if key == "lctrl" or key == "rctrl" then return true end
+        end
+        return false
+      end,
+    },
+    system = {
+      getClipboardText = function() return stub.clipboard end,
+      setClipboardText = function(text) stub.clipboard = text end,
+    },
     timer = {
       -- Fixed fake delta: deterministic, and non-zero so anything that
       -- divides by dt (or accumulates a phase) behaves sanely under test.
@@ -117,6 +136,12 @@ end
 
 function stub.setMouse(x, y)
   stub.mouseX, stub.mouseY = x, y
+end
+
+-- Sets whether love.keyboard.isDown("lctrl"/"rctrl") reports held, for
+-- exercising ctrl-click-to-edit and ctrl+v/ctrl+c.
+function stub.setCtrl(down)
+  stub.ctrlDown = down
 end
 
 -- Sets the stubbed screen size that love.graphics.getDimensions() reports —

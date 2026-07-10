@@ -80,6 +80,41 @@ function H.release(x, y, button, ui)
   return consumed
 end
 
+-- A textinput event + one frame — types one chunk of UTF-8 text into
+-- whatever widget currently holds keyboard focus. Mirrors H.press's
+-- event-then-frame shape. Returns whatever imlove.textinput() returned (was
+-- the event consumed).
+function H.type(text, ui)
+  local consumed = H.im.textinput(text)
+  H.frame(ui)
+  return consumed
+end
+
+-- A keypressed event + one frame — named-key edits (backspace, arrows, home,
+-- end, return, escape, ctrl+v/ctrl+c) on whatever widget currently holds
+-- keyboard focus. Returns whatever imlove.keypressed() returned.
+function H.key(key, ui)
+  local consumed = H.im.keypressed(key)
+  H.frame(ui)
+  return consumed
+end
+
+-- Queues several textinput/keypressed events (in the exact order given) and
+-- then runs a single frame — for asserting that multiple keys/chunks queued
+-- within one frame are drained and applied in order. `events` is an array of
+-- either plain strings (textinput chunks) or { key = "backspace" }-shaped
+-- tables (keypresses).
+function H.typeEvents(events, ui)
+  for _, ev in ipairs(events) do
+    if type(ev) == "table" then
+      H.im.keypressed(ev.key)
+    else
+      H.im.textinput(ev)
+    end
+  end
+  H.frame(ui)
+end
+
 -- Capture the last widget's rectangle into r as x1/y1/x2/y2.
 -- Call right after the widget, inside the UI function.
 function H.grabRect(r, im)

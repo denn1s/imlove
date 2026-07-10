@@ -7,6 +7,85 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+## [1.4.0] - 2026-07-10
+
+Keyboard & text input — `io.WantCaptureKeyboard` becomes real. Every
+existing name and signature only gained optional trailing arguments; nothing
+that worked in v1.3 changes rendered output or public behavior when a field
+isn't focused.
+
+### Added
+
+- `imlove.InputText(label, text, flags)` — a single-line text field. Click to
+  gain keyboard focus (a blinking cursor appears); Backspace/Delete/Left/
+  Right/Home/End all work, and the text scrolls horizontally inside the frame
+  so the cursor stays visible. By default returns the live edit buffer with
+  `changed = true` on every keystroke, matching every other imlove widget;
+  pass the `"EnterReturnsTrue"` flag for ImGui's other mode instead (keeps
+  returning the old text until Enter commits it once). Enter commits and
+  defocuses; Escape reverts to the text the field had when it gained focus
+  and defocuses; a click outside the field also defocuses it, without
+  consuming that click — it still reaches whatever it landed on. Ctrl+V
+  pastes at the cursor (`love.system.getClipboardText`); Ctrl+C copies the
+  *whole* field — there is no selection (and so no partial copy, no
+  word-left/word-right) in v1.4, a documented deviation from ImGui.
+- `imlove.InputFloat(label, value, step)` / `imlove.InputInt(label, value,
+  step)` — `InputText` restricted to numeric editing. The buffer parses on
+  every keystroke: a successful `tonumber()` returns the parsed value with
+  `changed = true`; an unparseable intermediate state (`""`, `"-"`, `"."`,
+  ...) keeps the last good value instead of committing garbage. Enter
+  commits (parsing, or reverting if it doesn't parse); Escape always
+  reverts. `InputInt` floors rather than rounds a typed float (`"3.7"`
+  commits as `3`). If `step` is given (and nonzero), small "-"/"+" buttons
+  nudge the value by `step` directly, bypassing text parsing entirely — they
+  work even while the field isn't focused.
+- Ctrl+click on `SliderFloat`/`SliderInt`/`DragFloat`/`DragInt` turns the
+  widget into a temporary numeric text editor until Enter commits (clamped
+  to the widget's own min/max, or whichever of a Drag's bounds exist),
+  Escape reverts, or a click elsewhere just stops editing. Rendered output
+  and public behavior are unchanged when a widget isn't ctrl-clicked.
+- `imlove.io.WantCaptureKeyboard` is now real: `true` after `NewFrame()`
+  whenever any of the above holds keyboard focus, `false` otherwise —
+  exactly like `WantCaptureMouse` already worked for the mouse.
+- `imlove.keypressed(key, scancode, isrepeat)` / `imlove.textinput(text)` are
+  now real forwarders instead of always-`false` stubs: wiring both is
+  **required** for the widgets above to receive any edits. Both return
+  `true` (consumed) whenever any field holds focus, regardless of the key,
+  so a game can keep checking the same return value it always has.
+  `keypressed` recognizes Backspace, Delete, Left, Right, Home, End, Return/
+  KPEnter (commit), Escape (revert), and Ctrl+C/Ctrl+V (copy/paste, checked
+  via `love.keyboard.isDown("lctrl", "rctrl")` at the moment the key lands);
+  anything else it doesn't queue for editing, but still reports consumed.
+- A UTF-8-aware cursor: positions are tracked in characters, not bytes
+  (`local utf8ok, utf8lib = pcall(require, "utf8")`, with a pure-Lua
+  lead-byte-counting fallback for plain LuaJIT, which is what the headless
+  tests run under) — typing, arrow keys, Backspace, and Delete all work
+  correctly on multi-byte input.
+- 23 new headless tests covering the focus lifecycle and
+  `WantCaptureKeyboard`/forwarder matrix, typing and editing keys, UTF-8
+  multi-byte input, Enter/Escape commit-and-revert (both `InputText` and the
+  numeric editors), the `EnterReturnsTrue` flag, click-away defocus, the
+  submitted-for-a-frame staleness rule, `InputFloat`/`InputInt` parsing,
+  step buttons, ctrl-click-to-type on all four slider/drag widgets
+  (commit-and-clamp, revert, plain-click-still-works), clipboard copy/paste,
+  a field inside an open popup, and a field under an open modal failing to
+  focus (`tests/test_input.lua`).
+
+### Changed
+
+- Internal refactor: `SliderFloat`/`SliderInt`/`DragFloat`/`DragInt` now
+  share layout (`sliderSetup`) and frame/grab/label rendering
+  (`sliderFrame`) helpers, plus the same edit-buffer machinery `InputText`
+  uses, to support ctrl-click-to-type without duplicating it four times.
+  Purely internal — no observable behavior change for any existing caller.
+
+### Fixed
+
+- `SliderFloat`/`SliderInt`/`DragFloat`/`DragInt` now correctly report
+  `changed = true` on the frame a ctrl-click-to-type edit is committed with
+  Enter (it was silently always `false`, an artifact of the refactor above
+  computing "changed" against a value it had already overwritten).
+
 ## [1.3.0] - 2026-07-10
 
 Overlays — the popup release: tooltips, popups, and modals, all drawn in a

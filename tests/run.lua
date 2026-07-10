@@ -22,6 +22,7 @@ local files = {
   "test_popups",
   "test_settings",
   "test_demo",
+  "test_input",
 }
 
 local pass, fail = 0, 0

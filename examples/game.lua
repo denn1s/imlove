@@ -13,6 +13,11 @@ value before the game does anything with the click.
 v1.3: right-click a row in the "Entities" list for a BeginPopupContextItem()
 context menu (Clone / Reset position / Delete) — the canonical debug-UI use
 for it.
+
+v1.4: select a circle and type in the "name" InputText to rename it -- the
+canonical WantCaptureKeyboard use: M.keypressed below checks imlove's return
+value before treating "space"/"escape" as game shortcuts, exactly the same
+guard M.mousepressed already applies to clicks.
 ]]
 
 local imlove = require "imlove"
@@ -29,6 +34,7 @@ local nextId = 1
 local function spawn()
   local e = {
     id = nextId,
+    name = "circle " .. nextId,
     x = math.random(40, WORLD_W - 40),
     y = math.random(40, WORLD_H - 40),
     angle = math.random() * 2 * math.pi,
@@ -76,7 +82,7 @@ local function debugPanel()
       local action, actionEntity
       for i, e in ipairs(entities) do
         imlove.PushID(e.id)
-        if imlove.Selectable("circle " .. e.id, selected == e) then
+        if imlove.Selectable(e.name, selected == e) then
           selected = e
         end
         -- v1.3: BeginPopupContextItem() — right-click this row for a
@@ -104,6 +110,7 @@ local function debugPanel()
 
       if action == "clone" then
         local clone = spawn()
+        clone.name = actionEntity.name .. " (clone)"
         clone.x, clone.y = actionEntity.x, actionEntity.y
         clone.radius, clone.speed, clone.hue =
           actionEntity.radius, actionEntity.speed, actionEntity.hue
@@ -123,6 +130,10 @@ local function debugPanel()
 
     if selected then
       imlove.Text("circle %d", selected.id)
+      -- InputText to rename the circle -- the Selectable() label above and
+      -- the "click a circle" text at the bottom of the screen both read
+      -- selected.name, so a rename shows up everywhere immediately.
+      selected.name = imlove.InputText("name", selected.name)
       selected.speed = imlove.SliderFloat("speed", selected.speed, 0, 200)
       selected.radius = imlove.SliderFloat("radius", selected.radius, 4, 40)
     else
@@ -199,8 +210,15 @@ end
 
 function M.keypressed(key)
   if imlove.keypressed(key) then return end
+  -- Reaching here means no field is focused (WantCaptureKeyboard is false),
+  -- so it's safe to treat "space"/"escape" as game shortcuts instead of
+  -- text being typed into the "name" InputText above.
   if key == "space" then paused = not paused end
   if key == "escape" then love.event.quit() end
+end
+
+function M.textinput(text)
+  imlove.textinput(text)
 end
 
 return M

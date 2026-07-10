@@ -63,4 +63,8 @@ function M.keypressed(key)
   if key == "escape" then love.event.quit() end
 end
 
+function M.textinput(text)
+  imlove.textinput(text)
+end
+
 return M

@@ -37,7 +37,7 @@ Two classic IMGUI idioms show up throughout, worth knowing:
 MIT License — see LICENSE.
 ------------------------------------------------------------------------------]]
 
-local imlove = { _VERSION = "1.3.0" }
+local imlove = { _VERSION = "1.4.0" }
 
 -- io mirrors Dear ImGui's ImGuiIO flags. After NewFrame() these tell the host
 -- game whether the UI wants the mouse/keyboard this frame, so the game can
@@ -46,7 +46,8 @@ local imlove = { _VERSION = "1.3.0" }
 -- more convenient form in LÖVE callbacks.
 imlove.io = {
   WantCaptureMouse    = false,
-  WantCaptureKeyboard = false, -- always false in v1: no keyboard widgets yet
+  WantCaptureKeyboard = false, -- true while InputText/InputFloat/InputInt (or
+                               -- a ctrl-clicked slider/drag) has focus
   -- Settings persistence (see "Settings persistence" below, and
   -- SaveIniSettings()/LoadIniSettings()): the file window position/size/
   -- collapsed state is saved to and loaded from, via love.filesystem.
@@ -121,6 +122,34 @@ local ctx = {
 
   openNodes = {},      -- TreeNode/CollapsingHeader id -> true while open
   dragAnchor = nil,    -- { id, x, value } drag origin for DragFloat/DragInt
+
+  -- Keyboard focus & text editing (see "Text input" section): at most one
+  -- widget — InputText/InputFloat/InputInt, or a ctrl-clicked slider/drag —
+  -- holds focus at a time, exactly like activeId but persistent across
+  -- frames (mouse up) until explicitly released (Enter/Escape/click-away/
+  -- stopped being submitted).
+  focusId       = nil, -- id of the focused widget, if any
+  focusRect     = nil, -- { x, y, w, h } screen rect it last drew at, for
+                       -- click-away detection
+  focusStamp    = nil, -- ctx.frame it was last submitted, for stale cleanup
+  focusDefocusPending = false, -- NewFrame()'s click-away check sets this
+                       -- INSTEAD OF clearing focus outright, so the still-
+                       -- focused widget gets one more chance, later this same
+                       -- frame, to drain ctx.frameEvents before it actually
+                       -- loses focus — otherwise a keystroke latched in the
+                       -- same poll as a defocusing click would be silently
+                       -- dropped (nobody left to claim it). The widget
+                       -- finishes the job by calling clearFocus() itself once
+                       -- it's done processing.
+  focusBlinkBase = nil, -- ctx.frame focus began, for the cursor blink cadence
+  editBuf       = nil, -- live text buffer (UTF-8 bytes) while focused
+  editCursor    = 0,   -- cursor position, in CHARACTERS (not bytes)
+  editOriginal  = nil, -- value at the moment focus was gained (Escape revert)
+  editScrollX   = 0,   -- horizontal scroll offset inside the field, in pixels
+  inputEvents   = {},  -- keypressed()/textinput() latch: ordered queue of
+                       -- { kind = "text", text = ... } / { kind = "key",
+                       -- key = ... }, applied by the next NewFrame()
+  frameEvents   = {},  -- this frame's queue, drained by the focused widget
 
   -- Popups & tooltips (see the "Popups & tooltips" section below): drawn in
   -- an overlay band above every window, and hit-tested before them.
@@ -431,6 +460,84 @@ local function releaseIfActive(id)
 end
 
 --------------------------------------------------------------------------------
+-- Keyboard focus lifecycle. See the ctx.focus*/ctx.edit* fields above and the
+-- "Text input" section further down for the widgets that use this. Lives
+-- here, ahead of NewFrame(), because NewFrame() itself needs setFocus()/
+-- clearFocus() for click-away detection, modal lockout, and stale cleanup.
+--------------------------------------------------------------------------------
+
+-- "utf8" is part of PUC Lua 5.3+ (what LÖVE 11 embeds) but NOT plain LuaJIT
+-- (what the headless tests run under) — hence the pcall and the pure-Lua
+-- fallback below, both of which must agree on every position.
+local utf8ok, utf8lib = pcall(require, "utf8")
+
+-- Character count of a UTF-8 string. The fallback counts only lead bytes
+-- (< 0x80 or >= 0xC0), skipping continuation bytes (0x80-0xBF).
+local function utf8Len(s)
+  if utf8ok then return utf8lib.len(s) or #s end
+  local n = 0
+  for i = 1, #s do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then n = n + 1 end
+  end
+  return n
+end
+
+-- Byte offset of the character at 0-based character index charIdx — i.e. the
+-- split point so that s:sub(1, offset - 1) is exactly the first charIdx
+-- characters. charIdx == utf8Len(s) (cursor at the very end) returns #s + 1.
+local function utf8Offset(s, charIdx)
+  if charIdx <= 0 then return 1 end
+  if utf8ok then
+    local ok, off = pcall(utf8lib.offset, s, charIdx + 1)
+    if ok and off then return off end
+    return #s + 1
+  end
+  local n = 0
+  for i = 1, #s do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then
+      n = n + 1
+      if n == charIdx + 1 then return i end
+    end
+  end
+  return #s + 1
+end
+
+local function ctrlHeld()
+  return love.keyboard and love.keyboard.isDown
+    and (love.keyboard.isDown("lctrl") or love.keyboard.isDown("rctrl"))
+end
+
+-- Gives a widget keyboard focus, seeding the live edit buffer. `original` is
+-- what Escape reverts to — a string for InputText, a number for the numeric
+-- editors — kept separate from `bufText` (always a string) so a numeric
+-- revert never round-trips through its formatted display and loses
+-- precision.
+local function setFocus(id, bufText, original)
+  ctx.focusId = id
+  ctx.editBuf = bufText
+  ctx.editCursor = utf8Len(bufText)
+  ctx.editOriginal = original
+  ctx.focusStamp = ctx.frame
+  ctx.focusBlinkBase = ctx.frame
+  ctx.editScrollX = 0
+  ctx.focusDefocusPending = false
+end
+
+local function clearFocus()
+  ctx.focusId = nil
+  ctx.focusRect = nil
+  ctx.focusStamp = nil
+  ctx.focusDefocusPending = false
+  ctx.focusBlinkBase = nil
+  ctx.editBuf = nil
+  ctx.editCursor = 0
+  ctx.editOriginal = nil
+  ctx.editScrollX = 0
+end
+
+--------------------------------------------------------------------------------
 -- Layout: each window carries a cursor. itemAdd() places a rectangle of the
 -- requested size at the cursor, advances to the next line, and remembers the
 -- rectangle so SameLine() and GetItemRect*() can refer back to it.
@@ -562,6 +669,10 @@ function imlove.NewFrame()
   m.rightPressed, ctx.rightPressLatch = ctx.rightPressLatch, false
   local wheelDy = ctx.wheelLatch
   ctx.wheelLatch = 0
+  -- Same latch-then-apply pattern for keypressed()/textinput(): this frame's
+  -- queue is whatever accumulated between the last frame and now, drained in
+  -- order by whichever widget holds focus (see the "Text input" section).
+  ctx.frameEvents, ctx.inputEvents = ctx.inputEvents, {}
 
   -- Safety net: if the mouse is up and there is no release event left to
   -- deliver, nothing can legitimately still be active. This unsticks widgets
@@ -570,6 +681,14 @@ function imlove.NewFrame()
     ctx.activeId = nil
     ctx.dragWindow = nil
     ctx.resizeWindow = nil
+  end
+
+  -- A focused text field that stops being submitted (its window/popup
+  -- closed, or the caller just stopped calling it) must not hold keyboard
+  -- capture hostage forever — same lastFrame-staleness idea as windows and
+  -- popups above.
+  if ctx.focusId and not (ctx.focusStamp and ctx.focusStamp >= ctx.frame - 1) then
+    clearFocus()
   end
 
   -- Prune popups whose BeginPopup()/BeginPopupModal()/BeginPopupContextItem()
@@ -628,6 +747,12 @@ function imlove.NewFrame()
         and ctx.activeId:sub(1, #prefix + 1) == (prefix .. "\31")
       if not ownedByModal then ctx.activeId = nil end
     end
+    if ctx.focusId then
+      local prefix = ctx.popups[ctx.popupOrder[modalIdx]].idPrefix
+      local ownedByModal = prefix
+        and ctx.focusId:sub(1, #prefix + 1) == (prefix .. "\31")
+      if not ownedByModal then clearFocus() end
+    end
   end
 
   -- Dismiss popups: a press — either mouse button — outside the topmost
@@ -669,9 +794,30 @@ function imlove.NewFrame()
     end
   end
 
+  -- A click anywhere outside the focused field defocuses it — but the click
+  -- itself is NOT consumed; it still reaches whatever it landed on (a
+  -- button, another field to focus instead, ...), same as clicking away from
+  -- an activeId widget always has. This does NOT clearFocus() outright: this
+  -- frame's ctx.frameEvents (just swapped in above) hasn't been drained yet —
+  -- that only happens later this same frame, inside whichever widget's own
+  -- `ctx.focusId == id` branch runs — so clearing focus here would leave a
+  -- keystroke latched in the same poll as the defocusing click with no owner
+  -- left to claim it. Flagging it instead lets that widget drain its events
+  -- first and finish the defocus itself once done (see processEditEvents()'s
+  -- callers). If the widget isn't submitted at all this frame, the
+  -- lastFrame-staleness check above already clears focus unconditionally —
+  -- dropping the event in that case is fine, since there's no field left to
+  -- receive it.
+  if ctx.focusId and m.pressed and ctx.focusRect then
+    local r = ctx.focusRect
+    if not pointIn(m.x, m.y, r.x, r.y, r.w, r.h) then
+      ctx.focusDefocusPending = true
+    end
+  end
+
   imlove.io.WantCaptureMouse = ctx.hoveredWindow ~= nil
     or ctx.activeId ~= nil or ctx.dragWindow ~= nil or #ctx.popupOrder > 0
-  imlove.io.WantCaptureKeyboard = false
+  imlove.io.WantCaptureKeyboard = ctx.focusId ~= nil
 end
 
 --- Draw the UI. Call at the end of love.draw so the UI lands on top of the
@@ -939,12 +1085,15 @@ local VALID_WINDOW_FLAGS = {
   NoScrollbar      = true, -- scrolling by wheel still works, bar hidden
 }
 
-local function normalizeFlags(flags, fnName)
+-- Shared by Begin()'s window flags and InputText()'s flags below — each
+-- passes its own valid-name set so an unknown flag is always an error
+-- naming the right function.
+local function normalizeFlags(flags, fnName, validSet)
   local set = {}
   if flags == nil then return set end
   if type(flags) == "string" then flags = { flags } end
   for _, f in ipairs(flags) do
-    if not VALID_WINDOW_FLAGS[f] then
+    if not validSet[f] then
       error("imlove." .. fnName .. "(): unknown flag '" .. tostring(f) .. "'", 3)
     end
     set[f] = true
@@ -1048,7 +1197,7 @@ function imlove.Begin(title, open, flags)
 
   ctx.currentWindow = win
   ctx.idStack = { idText }
-  win.flags = normalizeFlags(flags, "Begin")
+  win.flags = normalizeFlags(flags, "Begin", VALID_WINDOW_FLAGS)
 
   if open == false then
     -- Not submitted at all: don't touch position/size/draw list/lastFrame,
@@ -2063,42 +2212,130 @@ function imlove.RadioButton(label, active)
   return pressed
 end
 
---- A horizontal slider for a float. Click or drag anywhere on the track to
---- set the value. Returns the (possibly changed) value plus a changed flag:
----   volume, changed = imlove.SliderFloat("Volume", volume, 0, 1)
---- Same Lua-ism as Checkbox: assign the returned value back.
-function imlove.SliderFloat(label, value, min, max)
-  local win = requireWindow("SliderFloat")
-  value = tonumber(value) or min
-  if win.skipItems then return value, false end
+-- Applies this frame's queued key/text events (ctx.frameEvents, latched by
+-- keypressed()/textinput() — see the bottom of this file) to the live edit
+-- buffer/cursor. Only ever called once per frame, by whichever widget
+-- currently holds focus (ctx.focusId). Returns commit (Enter fired), cancel
+-- (Escape fired).
+local function processEditEvents()
+  local commit, cancel = false, false
+  local events = ctx.frameEvents
+  for i = 1, #events do
+    local e = events[i]
+    if e.kind == "text" then
+      local off = utf8Offset(ctx.editBuf, ctx.editCursor)
+      ctx.editBuf = ctx.editBuf:sub(1, off - 1) .. e.text ..
+        ctx.editBuf:sub(off)
+      ctx.editCursor = ctx.editCursor + utf8Len(e.text)
+    elseif e.key == "backspace" then
+      if ctx.editCursor > 0 then
+        local a = utf8Offset(ctx.editBuf, ctx.editCursor - 1)
+        local b = utf8Offset(ctx.editBuf, ctx.editCursor)
+        ctx.editBuf = ctx.editBuf:sub(1, a - 1) .. ctx.editBuf:sub(b)
+        ctx.editCursor = ctx.editCursor - 1
+      end
+    elseif e.key == "delete" then
+      local n = utf8Len(ctx.editBuf)
+      if ctx.editCursor < n then
+        local a = utf8Offset(ctx.editBuf, ctx.editCursor)
+        local b = utf8Offset(ctx.editBuf, ctx.editCursor + 1)
+        ctx.editBuf = ctx.editBuf:sub(1, a - 1) .. ctx.editBuf:sub(b)
+      end
+    elseif e.key == "left" then
+      ctx.editCursor = math.max(ctx.editCursor - 1, 0)
+    elseif e.key == "right" then
+      ctx.editCursor = math.min(ctx.editCursor + 1, utf8Len(ctx.editBuf))
+    elseif e.key == "home" then
+      ctx.editCursor = 0
+    elseif e.key == "end" then
+      ctx.editCursor = utf8Len(ctx.editBuf)
+    elseif e.key == "enter" then
+      commit = true
+    elseif e.key == "escape" then
+      cancel = true
+    elseif e.key == "paste" then
+      local ok, clip = pcall(love.system.getClipboardText)
+      if ok and type(clip) == "string" and #clip > 0 then
+        -- Every field here is single-line: strip \r and flatten \n to a
+        -- space so pasted multi-line clipboard text can't splice a newline
+        -- into the buffer and break the one-line cursor/scroll math (or
+        -- paint a second line) — the same filtering ImGui's own single-line
+        -- InputText applies to a paste.
+        clip = clip:gsub("\r", ""):gsub("\n", " ")
+        local off = utf8Offset(ctx.editBuf, ctx.editCursor)
+        ctx.editBuf = ctx.editBuf:sub(1, off - 1) .. clip ..
+          ctx.editBuf:sub(off)
+        ctx.editCursor = ctx.editCursor + utf8Len(clip)
+      end
+    elseif e.key == "copy" then
+      if love.system and love.system.setClipboardText then
+        pcall(love.system.setClipboardText, ctx.editBuf)
+      end
+    end
+  end
+  return commit, cancel
+end
+
+-- Draws a focused field's frame, live buffer (clipped and horizontally
+-- scrolled so the cursor always stays visible), and a blinking cursor.
+-- Shared by InputText and the numeric editors (InputFloat/InputInt and
+-- ctrl-clicked sliders/drags all just display ctx.editBuf as plain text).
+local function drawEditField(win, x, y, w, h)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  pushRect(win, "fill", x, y, w, h, style.colors.frameBgActive, style.rounding)
+  local availW = math.max(w - fpx * 2, 0)
+  local buf = ctx.editBuf
+  local beforeCursor = buf:sub(1, utf8Offset(buf, ctx.editCursor) - 1)
+  local cursorX = ctx.font:getWidth(beforeCursor)
+  local totalW = ctx.font:getWidth(buf)
+  local scroll = ctx.editScrollX or 0
+  if cursorX - scroll > availW then scroll = cursorX - availW end
+  if cursorX - scroll < 0 then scroll = cursorX end
+  scroll = clamp(scroll, 0, math.max(totalW - availW, 0))
+  ctx.editScrollX = scroll
+
+  pushClip(win, x + fpx, y, availW, h)
+  pushText(win, buf, x + fpx - scroll, y + fpy, style.colors.text)
+  -- Blink cadence: ~30-frame bands off ctx.frame rather than love.timer, so
+  -- it's deterministic and exercisable from the headless tests.
+  local blinkOn =
+    math.floor((ctx.frame - (ctx.focusBlinkBase or ctx.frame)) / 30) % 2 == 0
+  if blinkOn then
+    local cx = x + fpx + cursorX - scroll
+    pushLine(win, cx, y + 2, cx, y + h - 2, style.colors.text)
+  end
+  popClip(win)
+end
+
+-- Shared layout for the four slider/drag widgets: resolves the id, measures
+-- the label, and places the (track + label) rectangle at the cursor.
+local function sliderSetup(win, label)
   local display, idText = splitLabel(label)
   local id = makeId(idText)
-  local fpx, fpy = style.framePadding[1], style.framePadding[2]
   local trackW, h = style.sliderWidth, frameHeight()
   local tw = ctx.font:getWidth(display)
   local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
   local x, y = itemAdd(win, totalW, h)
-  local hovered, held = behavior(win, id, x, y, trackW, h)
-  recordItem(win, hovered, held, false)
+  return id, display, tw, x, y, trackW, h
+end
 
-  local old = value
-  if held then
-    local t = clamp((ctx.mouse.x - x) / trackW, 0, 1)
-    value = min + t * (max - min)
-  end
-  value = clamp(value, math.min(min, max), math.max(min, max))
-
+-- Shared frame + (optional) grab + value-text + label rendering. `grabT`,
+-- if given (0..1), draws a slider grab at that fraction of the track —
+-- SliderFloat/SliderInt pass it; DragFloat/DragInt pass nil (no grab, same
+-- as before this was ever a shared function).
+local function sliderFrame(win, x, y, trackW, h, hovered, held, grabT,
+    valueText, display, tw)
+  local fpy = style.framePadding[2]
   local bg = held and style.colors.frameBgActive
     or hovered and style.colors.frameBgHovered
     or style.colors.frameBg
   pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
-  local range = max - min
-  local t = range ~= 0 and clamp((value - min) / range, 0, 1) or 0
-  local grabW = style.grabWidth
-  pushRect(win, "fill", x + 2 + t * (trackW - grabW - 4), y + 2,
-    grabW, h - 4, held and style.colors.sliderGrabActive
-    or style.colors.sliderGrab, style.rounding)
-  local valueText = string.format("%.3f", value)
+  if grabT then
+    local grabW = style.grabWidth
+    pushRect(win, "fill", x + 2 + grabT * (trackW - grabW - 4), y + 2,
+      grabW, h - 4, held and style.colors.sliderGrabActive
+      or style.colors.sliderGrab, style.rounding)
+  end
   pushText(win, valueText,
     x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
     style.colors.text)
@@ -2106,53 +2343,162 @@ function imlove.SliderFloat(label, value, min, max)
     pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
       style.colors.text)
   end
-  return value, value ~= old
+end
+
+-- Ctrl-click on a slider/drag widget turns it into a temporary numeric text
+-- editor (same event queue/editing machinery as InputText) until Enter
+-- commits, Escape reverts, or a click elsewhere defocuses it (NewFrame()'s
+-- click-away handling is generic, not widget-specific — see setFocus()).
+-- `value` seeds/reverts the editor; `round`, if given, is applied to a
+-- successfully parsed result (SliderInt/DragInt pass round-to-nearest,
+-- matching their own click/drag rounding — InputInt's plain floor() is a
+-- deliberately different rule, see its own comment). `min`/`max` (either may
+-- be nil) clamp the committed value, same rule as dragValue(). Returns
+-- newValue, changed, stillEditing.
+local function numericEditOverlay(value, round, min, max)
+  local commit, cancel = processEditEvents()
+  if not commit and not cancel then
+    -- A deferred click-away (see NewFrame()'s ctx.focusDefocusPending) with
+    -- no Enter/Escape this frame is exactly "stop editing without
+    -- committing" — same as this function's own doc comment already
+    -- promises for a plain click elsewhere — so finish the defocus here,
+    -- now that processEditEvents() above has had its chance to drain this
+    -- frame's events, instead of leaving it pending for a widget that's
+    -- about to render itself as no-longer-focused.
+    if ctx.focusDefocusPending then
+      clearFocus()
+      return value, false, false
+    end
+    return value, false, true
+  end
+  local v
+  if cancel then
+    v = ctx.editOriginal
+  else
+    local parsed = tonumber(ctx.editBuf)
+    if parsed then
+      if round then parsed = round(parsed) end
+      if min and max then
+        parsed = clamp(parsed, math.min(min, max), math.max(min, max))
+      elseif min then
+        parsed = math.max(parsed, min)
+      elseif max then
+        parsed = math.min(parsed, max)
+      end
+      v = parsed
+    else
+      v = ctx.editOriginal
+    end
+  end
+  clearFocus()
+  return v, v ~= value, false
+end
+
+local function roundNearest(v) return math.floor(v + 0.5) end
+
+--- A horizontal slider for a float. Click or drag anywhere on the track to
+--- set the value. Returns the (possibly changed) value plus a changed flag:
+---   volume, changed = imlove.SliderFloat("Volume", volume, 0, 1)
+--- Same Lua-ism as Checkbox: assign the returned value back. Ctrl+click
+--- turns it into a numeric text editor instead — type an exact value; Enter
+--- commits it (clamped to min/max), Escape reverts, clicking elsewhere just
+--- stops editing without committing. Equivalent of ImGui::SliderFloat(),
+--- including the ctrl-click-to-type behavior.
+function imlove.SliderFloat(label, value, min, max)
+  local win = requireWindow("SliderFloat")
+  value = tonumber(value) or min
+  local inputValue = value -- captured before any edit-commit reassignment,
+                            -- below, so `changed` compares against what the
+                            -- caller actually passed in, not a value this
+                            -- same call already overwrote
+  if win.skipItems then return value, false end
+  local id, display, tw, x, y, trackW, h = sliderSetup(win, label)
+  local hovered, held = behavior(win, id, x, y, trackW, h)
+
+  if hovered and ctx.mouse.pressed and ctrlHeld() and ctx.focusId ~= id then
+    ctx.activeId = nil
+    held = false
+    setFocus(id, string.format("%.3f", value), value)
+  end
+
+  if ctx.focusId == id then
+    ctx.focusRect = { x = x, y = y, w = trackW, h = h }
+    ctx.focusStamp = ctx.frame
+    local newValue, changed, editing = numericEditOverlay(value, nil, min, max)
+    recordItem(win, hovered, editing, false)
+    if editing then
+      drawEditField(win, x, y, trackW, h)
+      if tw > 0 then
+        pushText(win, display, x + trackW + style.innerSpacing,
+          y + style.framePadding[2], style.colors.text)
+      end
+      return value, false
+    end
+    value, held = newValue, false
+  else
+    recordItem(win, hovered, held, false)
+  end
+
+  if held then
+    local t = clamp((ctx.mouse.x - x) / trackW, 0, 1)
+    value = min + t * (max - min)
+  end
+  value = clamp(value, math.min(min, max), math.max(min, max))
+  local range = max - min
+  local t = range ~= 0 and clamp((value - min) / range, 0, 1) or 0
+  sliderFrame(win, x, y, trackW, h, hovered, held, t,
+    string.format("%.3f", value), display, tw)
+  return value, value ~= inputValue
 end
 
 --- A horizontal slider for an integer, stepped and displayed as "%d". Same
---- click/drag/return contract as SliderFloat(). Equivalent of
---- ImGui::SliderInt().
+--- click/drag/return contract as SliderFloat(), including ctrl-click-to-type
+--- (committed values round to the nearest integer, same as dragging does).
+--- Equivalent of ImGui::SliderInt().
 function imlove.SliderInt(label, value, min, max)
   local win = requireWindow("SliderInt")
   value = math.floor(tonumber(value) or min)
+  local inputValue = value -- see SliderFloat()'s comment on this
   if win.skipItems then return value, false end
-  local display, idText = splitLabel(label)
-  local id = makeId(idText)
-  local fpx, fpy = style.framePadding[1], style.framePadding[2]
-  local trackW, h = style.sliderWidth, frameHeight()
-  local tw = ctx.font:getWidth(display)
-  local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
-  local x, y = itemAdd(win, totalW, h)
+  local id, display, tw, x, y, trackW, h = sliderSetup(win, label)
   local hovered, held = behavior(win, id, x, y, trackW, h)
-  recordItem(win, hovered, held, false)
 
-  local old = value
+  if hovered and ctx.mouse.pressed and ctrlHeld() and ctx.focusId ~= id then
+    ctx.activeId = nil
+    held = false
+    setFocus(id, string.format("%d", value), value)
+  end
+
+  if ctx.focusId == id then
+    ctx.focusRect = { x = x, y = y, w = trackW, h = h }
+    ctx.focusStamp = ctx.frame
+    local newValue, changed, editing =
+      numericEditOverlay(value, roundNearest, min, max)
+    recordItem(win, hovered, editing, false)
+    if editing then
+      drawEditField(win, x, y, trackW, h)
+      if tw > 0 then
+        pushText(win, display, x + trackW + style.innerSpacing,
+          y + style.framePadding[2], style.colors.text)
+      end
+      return value, false
+    end
+    value, held = newValue, false
+  else
+    recordItem(win, hovered, held, false)
+  end
+
   if held then
     local t = clamp((ctx.mouse.x - x) / trackW, 0, 1)
     value = min + t * (max - min)
   end
   value = clamp(value, math.min(min, max), math.max(min, max))
   value = math.floor(value + 0.5)
-
-  local bg = held and style.colors.frameBgActive
-    or hovered and style.colors.frameBgHovered
-    or style.colors.frameBg
-  pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
   local range = max - min
   local t = range ~= 0 and clamp((value - min) / range, 0, 1) or 0
-  local grabW = style.grabWidth
-  pushRect(win, "fill", x + 2 + t * (trackW - grabW - 4), y + 2,
-    grabW, h - 4, held and style.colors.sliderGrabActive
-    or style.colors.sliderGrab, style.rounding)
-  local valueText = string.format("%d", value)
-  pushText(win, valueText,
-    x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
-    style.colors.text)
-  if tw > 0 then
-    pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
-      style.colors.text)
-  end
-  return value, value ~= old
+  sliderFrame(win, x, y, trackW, h, hovered, held, t,
+    string.format("%d", value), display, tw)
+  return value, value ~= inputValue
 end
 
 -- Shared drag math for DragFloat/DragInt: while held, the value tracks
@@ -2187,74 +2533,89 @@ end
 --- to a fixed range like SliderFloat. min/max are optional — nil means
 --- unbounded on that side (ImGui uses a 0, 0 sentinel for this; Lua just
 --- omits the argument). speed defaults to 1.0, ImGui's default. Returns
---- value, changed like every other value widget. Equivalent of
---- ImGui::DragFloat().
+--- value, changed like every other value widget. Ctrl+click turns it into a
+--- numeric text editor, exactly like SliderFloat, clamped only to whichever
+--- of min/max are given. Equivalent of ImGui::DragFloat().
 function imlove.DragFloat(label, value, speed, min, max)
   local win = requireWindow("DragFloat")
   value = tonumber(value) or 0
+  local inputValue = value -- see SliderFloat()'s comment on this
   if win.skipItems then return value, false end
   speed = speed or 1.0
-  local display, idText = splitLabel(label)
-  local id = makeId(idText)
-  local fpx, fpy = style.framePadding[1], style.framePadding[2]
-  local trackW, h = style.sliderWidth, frameHeight()
-  local tw = ctx.font:getWidth(display)
-  local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
-  local x, y = itemAdd(win, totalW, h)
+  local id, display, tw, x, y, trackW, h = sliderSetup(win, label)
   local hovered, held = behavior(win, id, x, y, trackW, h)
-  recordItem(win, hovered, held, false)
 
-  local old = value
-  value = dragValue(id, held, value, speed, min, max)
-
-  local bg = held and style.colors.frameBgActive
-    or hovered and style.colors.frameBgHovered
-    or style.colors.frameBg
-  pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
-  local valueText = string.format("%.3f", value)
-  pushText(win, valueText,
-    x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
-    style.colors.text)
-  if tw > 0 then
-    pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
-      style.colors.text)
+  if hovered and ctx.mouse.pressed and ctrlHeld() and ctx.focusId ~= id then
+    ctx.activeId = nil
+    held = false
+    setFocus(id, string.format("%.3f", value), value)
   end
-  return value, value ~= old
+
+  if ctx.focusId == id then
+    ctx.focusRect = { x = x, y = y, w = trackW, h = h }
+    ctx.focusStamp = ctx.frame
+    local newValue, changed, editing = numericEditOverlay(value, nil, min, max)
+    recordItem(win, hovered, editing, false)
+    if editing then
+      drawEditField(win, x, y, trackW, h)
+      if tw > 0 then
+        pushText(win, display, x + trackW + style.innerSpacing,
+          y + style.framePadding[2], style.colors.text)
+      end
+      return value, false
+    end
+    value, held = newValue, false
+  else
+    recordItem(win, hovered, held, false)
+  end
+
+  value = dragValue(id, held, value, speed, min, max)
+  sliderFrame(win, x, y, trackW, h, hovered, held, nil,
+    string.format("%.3f", value), display, tw)
+  return value, value ~= inputValue
 end
 
 --- The integer counterpart of DragFloat(): speed defaults to 1, and the
---- value is rounded to the nearest integer. Equivalent of ImGui::DragInt().
+--- value is rounded to the nearest integer. Ctrl+click-to-type rounds the
+--- same way. Equivalent of ImGui::DragInt().
 function imlove.DragInt(label, value, speed, min, max)
   local win = requireWindow("DragInt")
   value = math.floor(tonumber(value) or 0)
+  local inputValue = value -- see SliderFloat()'s comment on this
   if win.skipItems then return value, false end
   speed = speed or 1
-  local display, idText = splitLabel(label)
-  local id = makeId(idText)
-  local fpx, fpy = style.framePadding[1], style.framePadding[2]
-  local trackW, h = style.sliderWidth, frameHeight()
-  local tw = ctx.font:getWidth(display)
-  local totalW = trackW + (tw > 0 and style.innerSpacing + tw or 0)
-  local x, y = itemAdd(win, totalW, h)
+  local id, display, tw, x, y, trackW, h = sliderSetup(win, label)
   local hovered, held = behavior(win, id, x, y, trackW, h)
-  recordItem(win, hovered, held, false)
 
-  local old = value
-  value = math.floor(dragValue(id, held, value, speed, min, max) + 0.5)
-
-  local bg = held and style.colors.frameBgActive
-    or hovered and style.colors.frameBgHovered
-    or style.colors.frameBg
-  pushRect(win, "fill", x, y, trackW, h, bg, style.rounding)
-  local valueText = string.format("%d", value)
-  pushText(win, valueText,
-    x + (trackW - ctx.font:getWidth(valueText)) / 2, y + fpy,
-    style.colors.text)
-  if tw > 0 then
-    pushText(win, display, x + trackW + style.innerSpacing, y + fpy,
-      style.colors.text)
+  if hovered and ctx.mouse.pressed and ctrlHeld() and ctx.focusId ~= id then
+    ctx.activeId = nil
+    held = false
+    setFocus(id, string.format("%d", value), value)
   end
-  return value, value ~= old
+
+  if ctx.focusId == id then
+    ctx.focusRect = { x = x, y = y, w = trackW, h = h }
+    ctx.focusStamp = ctx.frame
+    local newValue, changed, editing =
+      numericEditOverlay(value, roundNearest, min, max)
+    recordItem(win, hovered, editing, false)
+    if editing then
+      drawEditField(win, x, y, trackW, h)
+      if tw > 0 then
+        pushText(win, display, x + trackW + style.innerSpacing,
+          y + style.framePadding[2], style.colors.text)
+      end
+      return value, false
+    end
+    value, held = newValue, false
+  else
+    recordItem(win, hovered, held, false)
+  end
+
+  value = math.floor(dragValue(id, held, value, speed, min, max) + 0.5)
+  sliderFrame(win, x, y, trackW, h, hovered, held, nil,
+    string.format("%d", value), display, tw)
+  return value, value ~= inputValue
 end
 
 --- A progress bar filled to fraction (clamped to 0..1). w/h default to the
@@ -2706,6 +3067,231 @@ function imlove.ListBox(label, value, items, heightInItems)
 end
 
 --------------------------------------------------------------------------------
+-- Text input: InputText/InputFloat/InputInt. The first widgets to make
+-- io.WantCaptureKeyboard (and the keypressed()/textinput() forwarders at the
+-- bottom of this file) do anything — see setFocus()/clearFocus()/
+-- processEditEvents()/drawEditField() above, and NewFrame()'s focus
+-- lifecycle (click-away, modal lockout, stale cleanup).
+--------------------------------------------------------------------------------
+
+local VALID_INPUTTEXT_FLAGS = {
+  EnterReturnsTrue = true, -- keep returning the OLD text (changed = false)
+                           -- while typing; only Enter commits the new text
+                           -- (changed = true, once)
+}
+
+--- A single-line text field. Click it to gain keyboard focus (a blinking
+--- cursor appears); type to insert at the cursor from love.textinput()/
+--- love.keypressed() (wiring BOTH forwarders — see the bottom of this file —
+--- is now REQUIRED for typing to work). Enter commits and defocuses; Escape
+--- reverts to the text the field had when it gained focus and defocuses;
+--- clicking anywhere outside the field also defocuses it, without consuming
+--- that click — it still reaches whatever it landed on. Backspace/Delete/
+--- Left/Right/Home/End all work; the text scrolls horizontally inside the
+--- frame so the cursor stays visible. Ctrl+V pastes at the cursor; Ctrl+C
+--- copies the WHOLE field — there is no selection (and so no partial copy,
+--- no word-left/word-right) in v1.4, a documented deviation from ImGui.
+---
+--- By default, returns the LIVE edit buffer with changed = true on every
+--- keystroke — assign it back like any other imlove value, and it updates
+--- as the user types. Pass the "EnterReturnsTrue" flag for ImGui's other
+--- mode instead: keeps returning the OLD text (changed = false) while
+--- typing, and returns the new text with changed = true only once, the
+--- frame Enter commits it. `flags` is a string or array of strings.
+--- Equivalent of ImGui::InputText().
+function imlove.InputText(label, text, flags)
+  local win = requireWindow("InputText")
+  text = tostring(text)
+  if win.skipItems then return text, false end
+  local flagSet = normalizeFlags(flags, "InputText", VALID_INPUTTEXT_FLAGS)
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local fieldW, h = style.sliderWidth, frameHeight()
+  local tw = ctx.font:getWidth(display)
+  local totalW = fieldW + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local hovered, held, pressed = behavior(win, id, x, y, fieldW, h)
+
+  if pressed and ctx.focusId ~= id then
+    setFocus(id, text, text)
+  end
+
+  local focused = ctx.focusId == id
+  local resultText = text
+  if focused then
+    ctx.focusRect = { x = x, y = y, w = fieldW, h = h }
+    ctx.focusStamp = ctx.frame
+    local commit, cancel = processEditEvents()
+    if cancel then
+      resultText = ctx.editOriginal
+      clearFocus()
+    elseif commit then
+      resultText = ctx.editBuf
+      clearFocus()
+    else
+      resultText = flagSet.EnterReturnsTrue and text or ctx.editBuf
+      -- A deferred click-away (see NewFrame()'s ctx.focusDefocusPending):
+      -- neither Enter nor Escape fired, so this is "stop editing without
+      -- committing" — same result the branch above already computes —
+      -- finish the defocus now that processEditEvents() has drained this
+      -- frame's events, instead of leaving it pending.
+      if ctx.focusDefocusPending then clearFocus() end
+    end
+  end
+  focused = ctx.focusId == id -- may have just cleared via commit/cancel/
+                               -- deferred-click-away above
+
+  recordItem(win, hovered, focused, pressed)
+
+  if focused then
+    drawEditField(win, x, y, fieldW, h)
+  else
+    local bg = hovered and style.colors.frameBgHovered or style.colors.frameBg
+    pushRect(win, "fill", x, y, fieldW, h, bg, style.rounding)
+    pushClip(win, x + fpx, y, math.max(fieldW - fpx * 2, 0), h)
+    pushText(win, resultText, x + fpx, y + fpy, style.colors.text)
+    popClip(win)
+  end
+  if tw > 0 then
+    pushText(win, display, x + fieldW + style.innerSpacing, y + fpy,
+      style.colors.text)
+  end
+
+  return resultText, resultText ~= text
+end
+
+-- Shared by InputFloat/InputInt: a numeric InputText plus, when a nonzero
+-- step is given, small "-"/"+" buttons that nudge the value directly
+-- (bypassing text parsing entirely, so they always work even mid-edit).
+-- `round`, if given, is applied to both a successfully parsed value and a
+-- stepped value (InputInt passes math.floor — flooring, not rounding, is
+-- the documented behavior: typing "3.7" and committing gives 3).
+local function numericInput(fnName, label, value, step, round)
+  local win = requireWindow(fnName)
+  value = tonumber(value) or 0
+  if round then value = round(value) end
+  if win.skipItems then return value, false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local h = frameHeight()
+  local hasStep = step ~= nil and step ~= 0
+  local btnSize, gap = h, 4
+  local fieldW = style.sliderWidth
+  local tw = ctx.font:getWidth(display)
+  local totalW = fieldW + (hasStep and (btnSize * 2 + gap * 2) or 0)
+    + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local fmt = round and "%d" or "%.3f"
+
+  local hovered, held, pressed = behavior(win, id, x, y, fieldW, h)
+  if pressed and ctx.focusId ~= id then
+    setFocus(id, string.format(fmt, value), value)
+  end
+
+  local focused = ctx.focusId == id
+  local resultValue = value
+  if focused then
+    ctx.focusRect = { x = x, y = y, w = fieldW, h = h }
+    ctx.focusStamp = ctx.frame
+    local commit, cancel = processEditEvents()
+    if cancel then
+      resultValue = ctx.editOriginal
+      clearFocus()
+    elseif commit then
+      local parsed = tonumber(ctx.editBuf)
+      resultValue = parsed and (round and round(parsed) or parsed)
+        or ctx.editOriginal
+      clearFocus()
+    else
+      local parsed = tonumber(ctx.editBuf)
+      if parsed then resultValue = round and round(parsed) or parsed end
+      -- A deferred click-away (see NewFrame()'s ctx.focusDefocusPending):
+      -- neither Enter nor Escape fired, so finish the defocus now that
+      -- processEditEvents() has drained this frame's events — resultValue
+      -- above already reflects the live buffer, same as any other frame
+      -- while typing, so there's nothing else to do but stop editing.
+      if ctx.focusDefocusPending then clearFocus() end
+    end
+  end
+  focused = ctx.focusId == id -- may have just cleared via commit/cancel/
+                               -- deferred-click-away above
+
+  recordItem(win, hovered, focused, pressed)
+
+  if focused then
+    drawEditField(win, x, y, fieldW, h)
+  else
+    local bg = hovered and style.colors.frameBgHovered or style.colors.frameBg
+    pushRect(win, "fill", x, y, fieldW, h, bg, style.rounding)
+    pushClip(win, x + fpx, y, math.max(fieldW - fpx * 2, 0), h)
+    pushText(win, string.format(fmt, resultValue), x + fpx, y + fpy,
+      style.colors.text)
+    popClip(win)
+  end
+
+  local bx = x + fieldW + gap
+  if hasStep then
+    local minusId, plusId = makeId(idText .. "#minus"), makeId(idText .. "#plus")
+    local function stepBtn(bid, glyph, bx2)
+      local h2, hd2, pr2 = behavior(win, bid, bx2, y, btnSize, btnSize)
+      local color = hd2 and style.colors.buttonActive
+        or h2 and style.colors.buttonHovered or style.colors.button
+      pushRect(win, "fill", bx2, y, btnSize, btnSize, color, style.rounding)
+      local gw = ctx.font:getWidth(glyph)
+      pushText(win, glyph, bx2 + (btnSize - gw) / 2,
+        y + (btnSize - ctx.font:getHeight()) / 2, style.colors.text)
+      return pr2
+    end
+    -- A step button's rect is always OUTSIDE the field's own focusRect, so
+    -- clicking one while the field is focused already triggers NewFrame()'s
+    -- click-away defocus (deferred or not) before this point runs — `focused`
+    -- above already reflects that, and resultValue already reflects the live
+    -- edit buffer (parsed above), so stepping just nudges it further; there
+    -- is never a still-focused field left here to clear.
+    if stepBtn(minusId, "-", bx) then
+      resultValue = resultValue - step
+      if round then resultValue = round(resultValue) end
+    end
+    bx = bx + btnSize + gap
+    if stepBtn(plusId, "+", bx) then
+      resultValue = resultValue + step
+      if round then resultValue = round(resultValue) end
+    end
+    bx = bx + btnSize
+  end
+
+  if tw > 0 then
+    pushText(win, display, bx + style.innerSpacing, y + fpy, style.colors.text)
+  end
+
+  return resultValue, resultValue ~= value
+end
+
+--- InputText restricted to editing a float: while focused, the buffer
+--- parses on every keystroke — a successful tonumber() returns the parsed
+--- value with changed = true; an unparseable intermediate state ("", "-",
+--- ".", ...) returns the last good value unchanged (changed = false) until
+--- it parses again. Enter commits (parsing, or reverting if it doesn't
+--- parse); Escape always reverts. If `step` is given (and nonzero), small
+--- "-"/"+" buttons nudge the value by `step` directly. No selection, no
+--- format string, no ctrl-drag stepFast — deliberate deviations from ImGui
+--- documented in docs/imgui.md. Equivalent of ImGui::InputFloat().
+function imlove.InputFloat(label, value, step)
+  return numericInput("InputFloat", label, value, step, nil)
+end
+
+--- The integer counterpart of InputFloat(): typed values FLOOR to an integer
+--- (so "3.7" commits as 3) rather than rounding — a documented deviation
+--- from plain truncation-free InputInt semantics, chosen so partial input
+--- like "-" or "3." never round-trips into visible jitter. Equivalent of
+--- ImGui::InputInt().
+function imlove.InputInt(label, value, step)
+  return numericInput("InputInt", label, value, step, math.floor)
+end
+
+--------------------------------------------------------------------------------
 -- ID stack
 --------------------------------------------------------------------------------
 
@@ -2835,16 +3421,52 @@ function imlove.wheelmoved(dx, dy)
   return #ctx.popupOrder > 0 or windowAt(ctx.mouse.x, ctx.mouse.y) ~= nil
 end
 
---- Forward from love.keypressed. v1 has no keyboard widgets, so this never
---- consumes; it exists so integrations are already correct when text input
---- arrives in a future version.
-function imlove.keypressed(key)
-  return imlove.io.WantCaptureKeyboard
+-- Named keys the text-input editor (see InputText() and friends, and
+-- ctrl-clicked sliders/drags) recognizes and queues. Anything else — F-keys,
+-- Tab, arrow-up/down, ... — is left unqueued even while a field has focus,
+-- so it still reaches your game through whatever else you wire.
+local RECOGNIZED_KEYS = {
+  backspace = "backspace", delete = "delete", left = "left", right = "right",
+  home = "home", ["end"] = "end", ["return"] = "enter", kpenter = "enter",
+  escape = "escape",
+}
+
+--- Forward from love.keypressed. LÖVE actually calls
+--- love.keypressed(key, scancode, isrepeat); the extra arguments are
+--- accepted and ignored. While any InputText/InputFloat/InputInt (or a
+--- ctrl-clicked slider/drag) has keyboard focus (io.WantCaptureKeyboard),
+--- this queues the key for the next NewFrame() to apply — see
+--- processEditEvents() — and returns true (consumed), REGARDLESS of whether
+--- the key is one the editor recognizes: that's what lets, say, "space" stop
+--- pausing your game while the user is typing (check the return value, or
+--- io.WantCaptureKeyboard, before acting on a key). Recognizes Backspace,
+--- Delete, Left, Right, Home, End, Return/KPEnter (commit), Escape (revert),
+--- and Ctrl+C/Ctrl+V (copy the whole field / paste at the cursor — checked
+--- via love.keyboard.isDown("lctrl", "rctrl") at the moment the key lands).
+--- Returns false whenever no field has focus, exactly as in v1-v1.3.
+function imlove.keypressed(key, scancode, isrepeat)
+  if not imlove.io.WantCaptureKeyboard then return false end
+  local mapped = RECOGNIZED_KEYS[key]
+  if mapped then
+    ctx.inputEvents[#ctx.inputEvents + 1] = { kind = "key", key = mapped }
+  elseif (key == "v" or key == "c") and ctrlHeld() then
+    ctx.inputEvents[#ctx.inputEvents + 1] =
+      { kind = "key", key = key == "v" and "paste" or "copy" }
+  end
+  return true
 end
 
---- Forward from love.textinput. Same story as keypressed.
+--- Forward from love.textinput. Queues the UTF-8 text chunk for the next
+--- NewFrame() to insert at the focused field's cursor, in order with any
+--- queued key events (see imlove.keypressed()) — the same latch-then-apply
+--- pattern every other input event in imlove uses. Returns true whenever any
+--- field has focus (io.WantCaptureKeyboard), false otherwise — matching
+--- keypressed()'s "always true while focused" rule, not gated on whether
+--- `text` itself is one this editor would do anything with.
 function imlove.textinput(text)
-  return imlove.io.WantCaptureKeyboard
+  if not imlove.io.WantCaptureKeyboard then return false end
+  ctx.inputEvents[#ctx.inputEvents + 1] = { kind = "text", text = text }
+  return true
 end
 
 return imlove
