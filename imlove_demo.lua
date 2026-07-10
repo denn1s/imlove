@@ -84,6 +84,15 @@ local demo = {
   textEnterLastCommitted = "(nothing yet)",
   inputFloat = 1.5,
   inputInt = 3,
+
+  -- "Style"
+  themeColor = { 0.20, 0.32, 0.53, 1.00 }, -- starts equal to the default
+                                           -- button color, so the themed
+                                           -- button below looks unchanged
+                                           -- until the swatch is edited
+  styleRounding = 3,
+  stylePadX = 6,
+  stylePadY = 3,
 }
 
 local WAVE_HISTORY = 100
@@ -363,6 +372,37 @@ local function showTextInput()
   end
 end
 
+-- ------------------------------------------------------------------- Style
+
+local function showStyle()
+  if imlove.CollapsingHeader("Style") then
+    imlove.TextDisabled("ColorEdit4 + PushStyleColor: theme your own button.")
+    demo.themeColor = imlove.ColorEdit4("Button color", demo.themeColor)
+    imlove.PushStyleColor("button", demo.themeColor)
+    imlove.PushStyleColor("buttonHovered", demo.themeColor)
+    imlove.PushStyleColor("buttonActive", demo.themeColor)
+    imlove.Button("themed button")
+    imlove.PopStyleColor(3)
+
+    imlove.Separator()
+    imlove.TextDisabled("PushStyleVar: rounding and frame padding, live.")
+    demo.styleRounding = imlove.SliderFloat("rounding", demo.styleRounding,
+      0, 16)
+    demo.stylePadX = imlove.SliderFloat("frame padding x", demo.stylePadX,
+      0, 20)
+    demo.stylePadY = imlove.SliderFloat("frame padding y", demo.stylePadY,
+      0, 20)
+    imlove.PushStyleVar("rounding", demo.styleRounding)
+    imlove.PushStyleVar("framePadding", { demo.stylePadX, demo.stylePadY })
+    imlove.Button("styled preview")
+    imlove.PopStyleVar(2)
+
+    imlove.Separator()
+    imlove.TextDisabled("GetStyle() returns the live style table -- mutate " ..
+      "it directly for a one-time theme, at your own risk (see docs/api.md).")
+  end
+end
+
 -- ----------------------------------------------------------------- Windows
 
 local function showWindows()
@@ -436,6 +476,10 @@ local function ShowDemoWindow(open)
     showPopups()
     showWindows()
     showTextInput()
+    showStyle() -- last: keeps every earlier section's pixel geometry
+                -- unchanged for tests/test_demo.lua's hardcoded click
+                -- coordinates (same reasoning that put showTextInput()
+                -- last when it shipped in v1.4)
   end
   imlove.End()
 

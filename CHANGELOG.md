@@ -7,6 +7,75 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+## [1.5.0] - 2026-07-10
+
+Style & polish — the final v1 roadmap release. imlove's one built-in theme
+stops being fixed: every color and layout constant that drives the existing
+widgets is now reachable and temporarily overridable, and widgets can draw
+with a font other than the library's own default. Every existing name and
+signature only gained optional trailing arguments; nothing renders or
+behaves differently unless you reach for one of the functions below.
+
+### Added
+
+- `imlove.PushStyleColor(name, color)` / `imlove.PopStyleColor(count)` —
+  temporarily override one of `GetStyle().colors`'s fields (`"button"`,
+  `"text"`, `"frameBgHovered"`, ...) for everything drawn until the matching
+  pop. `name` is a string, not an enum — an unknown one is an `error()`,
+  the same typo protection as `Begin()`'s window flags. A single **global**
+  stack, not per-window, since a themed span is free to cross window
+  boundaries within a frame; must be balanced by the time `Render()` runs
+  (checked there, with the same "N left unpopped" wording as an unclosed
+  window) — and if it isn't, `Render()` fully unwinds the leftover entries
+  (restoring every shadowed color) *before* erroring, so a forgotten pop
+  never bricks the UI or its theme for the rest of the process, only the
+  offending frame. Draw commands capture a *reference* to whichever color
+  table is live when a widget is drawn, so a push/pop pair wrapped tightly
+  around one widget affects only that widget, never its neighbors.
+- `imlove.PushStyleVar(name, value)` / `imlove.PopStyleVar(count)` — the
+  same push/pop pattern (including the unwind-before-error recovery above)
+  for `GetStyle()`'s scalar/pair layout fields: `windowPadding`,
+  `innerSpacing`, `indent`, `rounding`, `sliderWidth`, `grabWidth` (plain
+  numbers) and `framePadding`, `itemSpacing` (`{x, y}` tables). An unknown
+  name, or a value of the wrong shape, is an `error()`. Also a global stack,
+  balanced the same way. `windowPadding` specifically is sampled once, by
+  `Begin()` — push it *before* `Begin()` to pad a window; pushing it
+  *after* `Begin()` (even if popped again before the matching `End()`) has
+  no effect on that already-open window, since its margin and auto-fit size
+  were already locked in.
+- `imlove.GetStyle()` — returns the *live* style table every widget already
+  reads from (mutate it at your own risk before `NewFrame()`; `PushStyleColor`/
+  `PushStyleVar` are the frame-safe way to make a temporary change).
+- `imlove.ColorEdit3(label, color)` / `imlove.ColorEdit4(label, color)` — a
+  color-swatch button + label; click it to open a popup with a `SliderFloat`
+  (0..1) per channel and a live preview swatch. Returns a *new* table when
+  changed (never mutates the one passed in, the same convention every
+  table-valued imlove widget already follows) and the same reference back
+  otherwise. Deliberately modest next to ImGui's: no HSV wheel, no hex
+  input, no right-click "copy as..." menu — just the sliders. `ColorEdit3`
+  never touches a 4th channel already on the table you pass it.
+- `imlove.PushFont(font)` / `imlove.PopFont()` — push any LÖVE `Font` object
+  (`love.graphics.newFont(...)`): every measurement (`GetItemRect*`, layout)
+  and every widget drawn until the matching pop uses it instead of the
+  library's own lazily-created default font. Also a global stack, balanced
+  the same way as the style stacks above (including the unwind-before-error
+  recovery). `font` must look like a `Font` (non-nil, with `getWidth`/
+  `getHeight`) — anything else is an `error()` immediately, rather than
+  crashing frames later inside `textSize()`.
+- 24 new headless tests (`tests/test_style.lua`) covering: the color-stack's
+  draw-list reference semantics (a push/pop pair affects only the wrapped
+  widget), nested pushes, `PopStyleColor(count)`, unknown-name and
+  wrong-shape errors, unbalanced-push detection at `Render()` for all three
+  stacks (color, var, font) *and* that `Render()` fully recovers from each
+  (theme/font restored, next frame works normally), `PushStyleVar` actually
+  changing `Button` geometry and cursor spacing, `windowPadding` being
+  locked at `Begin()` (pushing it after `Begin()` has no effect; pushing it
+  before pads symmetrically), `GetStyle()`'s live-table semantics,
+  `ColorEdit4`'s full open-popup/drag-slider/new-table/original-untouched
+  cycle, `ColorEdit3`'s alpha passthrough, `PushFont` changing both measured
+  layout and which font a text draw command carries, and `PushFont` rejecting
+  a non-Font argument immediately.
+
 ## [1.4.0] - 2026-07-10
 
 Keyboard & text input — `io.WantCaptureKeyboard` becomes real. Every

@@ -37,7 +37,7 @@ Two classic IMGUI idioms show up throughout, worth knowing:
 MIT License — see LICENSE.
 ------------------------------------------------------------------------------]]
 
-local imlove = { _VERSION = "1.4.0" }
+local imlove = { _VERSION = "1.5.0" }
 
 -- io mirrors Dear ImGui's ImGuiIO flags. After NewFrame() these tell the host
 -- game whether the UI wants the mouse/keyboard this frame, so the game can
@@ -103,7 +103,23 @@ local style = {
 local ctx = {
   frame       = 0,     -- frame counter; windows stamp it when submitted
   inFrame     = false, -- true between NewFrame() and Render()
-  font        = nil,   -- font captured at NewFrame(), used for all measuring
+  baseFont    = nil,   -- the library's own lazily-created 13px font (see
+                       -- NewFrame()'s "the UI owns its font" comment)
+  font        = nil,   -- the CURRENT font: baseFont, or whatever PushFont()
+                       -- last pushed — every measuring call (textSize(),
+                       -- frameHeight(), a widget's own ctx.font:getWidth()/
+                       -- getHeight()) reads this, so a PushFont() takes
+                       -- effect for layout immediately, not just drawing
+  fontStack   = {},    -- PushFont()/PopFont() stack of previously-active
+                       -- fonts, restored on PopFont(); must be empty by
+                       -- Render() (see PushFont())
+
+  -- Style (see the "Style" section below): PushStyleColor()/PushStyleVar()
+  -- are a single GLOBAL LIFO stack each (not per-window, unlike idStack),
+  -- because a themed span can freely cross window boundaries within a
+  -- frame. Both must be empty by Render(), exactly like fontStack above.
+  colorStack  = {},    -- { name = ..., old = <color table> } entries
+  varStack    = {},    -- { name = ..., old = <number or {x,y}> } entries
 
   windows     = {},    -- title -> persistent window state
   windowOrder = {},    -- draw order, back-to-front (last = front-most)
@@ -246,7 +262,9 @@ end
 
 local function pushText(win, text, x, y, color)
   win.drawList[#win.drawList + 1] = { kind = "text", text = text,
-    x = math.floor(x + 0.5), y = math.floor(y + 0.5), color = color }
+    x = math.floor(x + 0.5), y = math.floor(y + 0.5), color = color,
+    font = ctx.font } -- captured now, so a later PopFont() doesn't change
+                      -- how already-submitted text is drawn (see PushFont())
 end
 
 local function pushTriangle(win, x1, y1, x2, y2, x3, y3, color)
@@ -596,7 +614,7 @@ end
 -- clicks meant for the scrollbar.
 local function availWidth(win)
   local x = win.innerX + win.indent
-  local right = win.x + win.w - style.windowPadding
+  local right = win.x + win.w - win.pad
   if win.hasScrollbar then right = right - style.scrollbarWidth end
   return math.max(right - x, 0)
 end
@@ -650,7 +668,9 @@ function imlove.NewFrame()
   -- The UI owns its font. Adopting the game's current font here (as v1.0.0
   -- did) is a trap: the game may release() that font at any time — e.g. a
   -- scene unloading — and the UI would then draw with a dead object.
-  ctx.font = ctx.font or love.graphics.newFont(13)
+  ctx.baseFont = ctx.baseFont or love.graphics.newFont(13)
+  ctx.font = ctx.baseFont -- reset to the base font each frame; PushFont()
+                          -- inside the frame is always balanced by Render()
 
   -- Settings persistence: load once, lazily, the very first frame (never
   -- again after that — see LoadIniSettings() for reloading on demand).
@@ -830,13 +850,64 @@ function imlove.Render()
   if ctx.currentWindow then
     error("imlove.Render() called while " .. whatIsOpen(ctx.currentWindow), 2)
   end
+  -- PushStyleColor/PushStyleVar/PushFont are global (not per-window) stacks,
+  -- so — unlike idStack, which End()/EndChild()/EndPopup() each check as
+  -- soon as their own window closes — they can only be checked here, once,
+  -- after every window this frame has had a chance to pop what it pushed.
+  --
+  -- A forgotten Pop* must NOT brick the UI forever: fully unwind every
+  -- remaining entry first — restoring style.colors/style/ctx.font to what
+  -- they were before the offending push(es), in LIFO order, exactly like the
+  -- matching Pop* call would have — and reset the frame-transient state
+  -- below (ctx.inFrame) exactly as a clean Render() does, and ONLY THEN
+  -- error. A caller who pcalls Render() gets a loud error every offending
+  -- frame, but the UI keeps working and the theme/font stay uncorrupted,
+  -- instead of every following NewFrame() failing with "called twice" (the
+  -- error below left ctx.inFrame stuck true) while the shadowed style also
+  -- silently stayed corrupted forever.
+  local unbalanced = nil
+  if #ctx.colorStack > 0 then
+    unbalanced = (unbalanced and (unbalanced .. "; ") or "") ..
+      #ctx.colorStack .. " imlove.PushStyleColor() left unpopped"
+    for i = #ctx.colorStack, 1, -1 do
+      local entry = ctx.colorStack[i]
+      style.colors[entry.name] = entry.old
+      ctx.colorStack[i] = nil
+    end
+  end
+  if #ctx.varStack > 0 then
+    unbalanced = (unbalanced and (unbalanced .. "; ") or "") ..
+      #ctx.varStack .. " imlove.PushStyleVar() left unpopped"
+    for i = #ctx.varStack, 1, -1 do
+      local entry = ctx.varStack[i]
+      style[entry.name] = entry.old
+      ctx.varStack[i] = nil
+    end
+  end
+  if #ctx.fontStack > 0 then
+    unbalanced = (unbalanced and (unbalanced .. "; ") or "") ..
+      #ctx.fontStack .. " imlove.PushFont() left unpopped"
+    -- ctx.fontStack[1] is the outermost save -- the font that was active
+    -- before the FIRST unpopped PushFont() -- so it's what's left active
+    -- once every entry above it has unwound, same as popping down to it one
+    -- PopFont() at a time would leave.
+    ctx.font = ctx.fontStack[1]
+    for i = #ctx.fontStack, 1, -1 do ctx.fontStack[i] = nil end
+  end
   ctx.inFrame = false
+  if unbalanced then
+    error("imlove.Render(): " .. unbalanced, 2)
+  end
 
   local g = love.graphics
   local pr, pg, pb, pa = g.getColor()
   local prevFont = g.getFont()
   local psx, psy, psw, psh = g.getScissor()
   g.setFont(ctx.font)
+  local currentDrawFont = ctx.font -- tracks the font last handed to
+                                    -- g.setFont() during playback below, so a
+                                    -- PushFont() span only costs a setFont()
+                                    -- call where the font actually changes
 
   -- Clip stack: clipPush/clipPop commands nest, and each level is the
   -- INTERSECTION with whatever was already scissored, so a BeginChild()
@@ -880,6 +951,10 @@ function imlove.Render()
         if c.kind == "rect" then
           g.rectangle(c.mode, c.x, c.y, c.w, c.h, c.rounding, c.rounding)
         elseif c.kind == "text" then
+          if c.font and c.font ~= currentDrawFont then
+            g.setFont(c.font)
+            currentDrawFont = c.font
+          end
           g.print(c.text, c.x, c.y)
         elseif c.kind == "triangle" then
           g.polygon("fill", c.x1, c.y1, c.x2, c.y2, c.x3, c.y3)
@@ -1254,6 +1329,15 @@ function imlove.Begin(title, open, flags)
 
   local fpx, fpy = style.framePadding[1], style.framePadding[2]
   local pad = style.windowPadding
+  -- Locked for this window's whole Begin()/End() span: a
+  -- PushStyleVar("windowPadding", ...) issued after Begin() (still balanced
+  -- by End(), so Render()'s balance check never sees it) must not bake the
+  -- OLD pad into the left/top margin below while the NEW value leaks into
+  -- End()'s auto-fit size and scroll math instead — that mismatch is what
+  -- made a pushed-after-Begin pad size the window lopsided. Every place that
+  -- needs "this window's padding" from here on reads win.pad, never
+  -- style.windowPadding directly again (see End(), availWidth()).
+  win.pad = pad
   win.titleH = ctx.font:getHeight() + fpy * 2
   local flagSet = win.flags
   local hasTitleBar = not flagSet.NoTitleBar
@@ -1480,7 +1564,9 @@ function imlove.End()
     return
   end
 
-  local pad = style.windowPadding
+  local pad = win.pad -- the value Begin() locked in, NOT style.windowPadding
+                      -- (which a PushStyleVar() between Begin() and here may
+                      -- have since changed) -- see Begin()'s comment.
   local flagSet = win.flags or {}
   local autoFit = flagSet.AlwaysAutoResize or win.sizeMode ~= "fixed"
 
@@ -1604,12 +1690,16 @@ function imlove.BeginChild(idStr, w, h, border)
     root.childScroll[scrollKey] = scrollState
   end
 
+  -- Locked for this child's whole BeginChild()/EndChild() span, same
+  -- reasoning as win.pad in Begin() -- EndChild() must read child.pad back,
+  -- never style.windowPadding directly, or a PushStyleVar("windowPadding")
+  -- issued inside the child bakes an inconsistent pad into its scroll math.
   local pad = style.windowPadding
   local child = {
     isChild = true, title = idStr, idStr = idStr, scrollKey = scrollKey,
     root = root, parent = parent,
     idStackBase = idStackBase, border = border and true or false,
-    x = cx, y = cy, w = resolvedW, h = resolvedH,
+    x = cx, y = cy, w = resolvedW, h = resolvedH, pad = pad,
     indent = 0, innerX = cx + pad,
     nextY = cy + pad - scrollState.scrollY,
     sameLineX = nil,
@@ -1660,7 +1750,7 @@ function imlove.EndChild()
   if not win.skipItems then
     popClip(win)
 
-    local pad = style.windowPadding
+    local pad = win.pad -- the value BeginChild() locked in -- see there.
     local st = win.scrollState
     -- Same scrollY-added-back correction as End() — see the comment there.
     -- The subtracted origin must be the UNPADDED win.y, exactly like End()
@@ -1788,10 +1878,14 @@ local function beginPopupContent(id, strId, kind, title)
     win.titleCmd = nil
   end
 
+  -- Locked for this popup's whole beginPopupContent()/endPopupContent()
+  -- span, same reasoning as win.pad in Begin() -- endPopupContent() must
+  -- read win.pad back, never style.windowPadding directly.
+  win.pad = style.windowPadding
   win.skipItems = false
   win.indent = 0
-  win.innerX = win.x + style.windowPadding
-  win.nextY = win.y + win.titleBarH + style.windowPadding
+  win.innerX = win.x + win.pad
+  win.nextY = win.y + win.titleBarH + win.pad
   win.lineY, win.lineH = win.nextY, 0
   win.sameLineX = nil
   win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0,
@@ -1807,7 +1901,7 @@ end
 -- convention a resizing window uses — so it's never touched here) and
 -- restores ctx.currentWindow.
 local function endPopupContent(win)
-  local pad = style.windowPadding
+  local pad = win.pad -- the value beginPopupContent() locked in -- see there.
   win.w = math.max(win.contentMaxX + pad - win.x, style.minWindowWidth)
   win.h = math.max(win.contentMaxY + pad - win.y, win.titleBarH)
   win.bgCmd.w, win.bgCmd.h = win.w, win.h
@@ -1879,8 +1973,12 @@ function imlove.BeginTooltip()
   win.titleCmd = nil
   win.skipItems = false
   win.indent = 0
-  win.innerX = win.x + style.windowPadding
-  win.nextY = win.y + style.windowPadding
+  -- Locked for this tooltip's whole BeginTooltip()/EndTooltip() span, same
+  -- reasoning as win.pad in Begin() -- EndTooltip() must read win.pad back,
+  -- never style.windowPadding directly.
+  win.pad = style.windowPadding
+  win.innerX = win.x + win.pad
+  win.nextY = win.y + win.pad
   win.lineY, win.lineH = win.nextY, 0
   win.sameLineX = nil
   win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0,
@@ -1896,7 +1994,7 @@ function imlove.EndTooltip()
   if not win or not win.isTooltip then
     error("imlove.EndTooltip() called without a matching imlove.BeginTooltip()", 2)
   end
-  local pad = style.windowPadding
+  local pad = win.pad -- the value BeginTooltip() locked in -- see there.
   win.w = math.max(win.contentMaxX + pad - win.x, style.minWindowWidth)
   win.h = math.max(win.contentMaxY + pad - win.y, 1)
   win.bgCmd.w, win.bgCmd.h = win.w, win.h
@@ -3289,6 +3387,270 @@ end
 --- ImGui::InputInt().
 function imlove.InputInt(label, value, step)
   return numericInput("InputInt", label, value, step, math.floor)
+end
+
+--------------------------------------------------------------------------------
+-- Style: PushStyleColor/PushStyleVar temporarily override an entry in the
+-- module-local `style` table (declared at the very top of this file) for
+-- everything drawn until the matching pop — both are a single GLOBAL LIFO
+-- stack each (like ctx.fontStack, unlike the per-window ctx.idStack), since a
+-- themed span is free to cross window boundaries within a frame. Both must
+-- be balanced by Render() time (see its balance checks) rather than by
+-- End(), for the same reason. PushFont works the same way for ctx.font.
+--------------------------------------------------------------------------------
+
+-- style.colors' field names, exactly as PushStyleColor()/GetStyle().colors
+-- use them (see docs/imgui.md for the ImGuiCol_* mapping) — built from the
+-- table itself so the valid-name set can never drift out of sync with it.
+local STYLE_COLOR_NAMES = {}
+for name in pairs(style.colors) do STYLE_COLOR_NAMES[name] = true end
+
+-- Style vars: name -> the shape PushStyleVar()/PopStyleVar() enforce for it,
+-- matching how each is already stored in `style` above. Pair-shaped vars are
+-- {x, y} tables, not separate x/y arguments.
+local STYLE_VAR_SHAPES = {
+  windowPadding = "number",
+  framePadding  = "pair",
+  itemSpacing   = "pair",
+  innerSpacing  = "number",
+  indent        = "number",
+  rounding      = "number",
+  sliderWidth   = "number",
+  grabWidth     = "number",
+}
+
+local function checkStyleVar(fnName, name, value)
+  local shape = STYLE_VAR_SHAPES[name]
+  if not shape then
+    error("imlove." .. fnName .. "(): unknown style var '" .. tostring(name)
+      .. "'", 3)
+  end
+  if shape == "number" then
+    if type(value) ~= "number" then
+      error("imlove." .. fnName .. "(): '" .. name .. "' expects a number, got "
+        .. type(value), 3)
+    end
+  elseif type(value) ~= "table" or type(value[1]) ~= "number"
+      or type(value[2]) ~= "number" then
+    error("imlove." .. fnName .. "(): '" .. name .. "' expects a {x, y} table",
+      3)
+  end
+end
+
+--- Push a color override onto a global stack: every widget drawn from now
+--- until the matching PopStyleColor() uses `color` ({r, g, b, a}) in place
+--- of GetStyle().colors[name]. name is one of that table's field names
+--- (e.g. "button", "text", "frameBg") — an unknown name errors immediately,
+--- the same typo protection as Begin()'s window flags. Draw commands
+--- capture a REFERENCE to whatever color table is live at the time a widget
+--- is drawn, so a push/pop wrapped tightly around one widget never leaks
+--- into the next, even though colors are restored by mutating the same
+--- `style.colors[name]` slot rather than by swapping in a new table.
+--- Equivalent of ImGui::PushStyleColor(), with a string name instead of an
+--- ImGuiCol enum.
+function imlove.PushStyleColor(name, color)
+  if not STYLE_COLOR_NAMES[name] then
+    error("imlove.PushStyleColor(): unknown color '" .. tostring(name)
+      .. "'", 2)
+  end
+  ctx.colorStack[#ctx.colorStack + 1] = { name = name, old = style.colors[name] }
+  style.colors[name] = color
+end
+
+--- Pop `count` (default 1) color overrides pushed by PushStyleColor(), each
+--- restoring the color it shadowed. Equivalent of ImGui::PopStyleColor().
+function imlove.PopStyleColor(count)
+  count = count or 1
+  for _ = 1, count do
+    local n = #ctx.colorStack
+    if n == 0 then
+      error("imlove.PopStyleColor(): no matching imlove.PushStyleColor()", 2)
+    end
+    local entry = ctx.colorStack[n]
+    ctx.colorStack[n] = nil
+    style.colors[entry.name] = entry.old
+  end
+end
+
+--- Push a style var override onto a global stack, same push/pop pattern as
+--- PushStyleColor() but for GetStyle()'s scalar/pair fields (rounding,
+--- framePadding, itemSpacing, innerSpacing, indent, sliderWidth, grabWidth,
+--- windowPadding). value's shape must match the field: a plain number for
+--- the scalar ones, or a {x, y} table for framePadding/itemSpacing — an
+--- unknown name, or a value of the wrong shape, errors immediately.
+--- Equivalent of ImGui::PushStyleVar(), with a string name instead of an
+--- ImGuiStyleVar enum.
+function imlove.PushStyleVar(name, value)
+  checkStyleVar("PushStyleVar", name, value)
+  ctx.varStack[#ctx.varStack + 1] = { name = name, old = style[name] }
+  style[name] = value
+end
+
+--- Pop `count` (default 1) style vars pushed by PushStyleVar(), each
+--- restoring the value it shadowed. Equivalent of ImGui::PopStyleVar().
+function imlove.PopStyleVar(count)
+  count = count or 1
+  for _ = 1, count do
+    local n = #ctx.varStack
+    if n == 0 then
+      error("imlove.PopStyleVar(): no matching imlove.PushStyleVar()", 2)
+    end
+    local entry = ctx.varStack[n]
+    ctx.varStack[n] = nil
+    style[entry.name] = entry.old
+  end
+end
+
+--- Returns the LIVE style table — the exact same one every widget already
+--- reads from, with the scalar fields (windowPadding, framePadding, ...) at
+--- the top level and a `colors` sub-table underneath. Mutate it directly at
+--- your own risk: a change takes effect immediately, persists until you
+--- undo it yourself, and (unlike PushStyleColor()/PushStyleVar()) is never
+--- caught by Render()'s balance check if you forget to. PushStyleColor()/
+--- PushStyleVar() are the frame-safe way to make a temporary change; reach
+--- for GetStyle() only to set up a theme once, e.g. right after
+--- `require "imlove"`. Has no direct ImGui equivalent (ImGui's
+--- ImGui::GetStyle() returns a struct meant for exactly this kind of
+--- one-time setup too; imlove just has no separate style-editor demo).
+function imlove.GetStyle()
+  return style
+end
+
+--- Push a font (any LÖVE Font object — love.graphics.newFont(...), with or
+--- without a path/size) onto a stack: every textSize() measurement,
+--- frameHeight() calculation, and widget drawn from now until the matching
+--- PopFont() uses it instead of the library's own default font. Must be
+--- balanced by Render() time. Errors immediately if `font` isn't a
+--- Font-shaped object (has getWidth/getHeight). Equivalent of
+--- ImGui::PushFont().
+function imlove.PushFont(font)
+  -- Validated up front like every sibling Push* added this release: without
+  -- this, PushFont(nil) (or any non-Font value) doesn't fail here — it fails
+  -- frames later, deep inside textSize() or Render(), with a raw "attempt to
+  -- index a nil value" that gives no hint PushFont() was the actual mistake.
+  -- Duck-typed (getWidth/getHeight) rather than checking for LÖVE's Font
+  -- userdata type specifically, so hand-built stub fonts (see tests) work
+  -- too — every real call site only ever calls font:getWidth()/getHeight(),
+  -- never anything more specific.
+  if not (font and (type(font) == "userdata" or type(font) == "table")
+      and font.getWidth and font.getHeight) then
+    error("imlove.PushFont(): expected a LÖVE Font object", 2)
+  end
+  ctx.fontStack[#ctx.fontStack + 1] = ctx.font
+  ctx.font = font
+end
+
+--- Pop the font pushed by PushFont(), restoring whatever font was active
+--- before it (the library's own default font, or an outer PushFont()).
+--- Equivalent of ImGui::PopFont().
+function imlove.PopFont()
+  local n = #ctx.fontStack
+  if n == 0 then
+    error("imlove.PopFont(): no matching imlove.PushFont()", 2)
+  end
+  ctx.font = ctx.fontStack[n]
+  ctx.fontStack[n] = nil
+end
+
+-- Shared by ColorEdit3()/ColorEdit4(): a color-swatch button (click opens a
+-- popup with one SliderFloat 0..1 per channel plus a live preview swatch)
+-- plus a label, reusing the exact same press-to-toggle popup pattern as
+-- Combo(). n is 3 or 4 (RGB vs RGBA). Returns a NEW table when changed —
+-- never mutates the one passed in, the "no mutation" convention every
+-- table-valued widget in this library follows — and the SAME reference
+-- back, unchanged, otherwise (mirrors SliderFloat's `value, changed`
+-- contract).
+local function colorEdit(fnName, label, color, n)
+  local win = requireWindow(fnName)
+  if win.skipItems then return color, false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpy = style.framePadding[2]
+  local h = frameHeight()
+  local swatchW = h * 2
+  local tw = ctx.font:getWidth(display)
+  local totalW = swatchW + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local hovered, held = behavior(win, id, x, y, swatchW, h)
+  recordItem(win, hovered, held, false)
+
+  local popId = popupId(idText)
+  local isOpen = popupIsOpen(popId)
+  if hovered and ctx.mouse.pressed then
+    -- Press-time toggle, same reasoning as Combo()'s: this box is the
+    -- popup's ownerRect, so a press here while open reaches this toggle
+    -- instead of being treated as an outside/dismiss click.
+    if isOpen then
+      closePopup(popId)
+    else
+      openPopupById(popId, "popup", { x = x, y = y, w = swatchW, h = h },
+        x, y + h + 2)
+    end
+    isOpen = not isOpen
+  end
+
+  pushRect(win, "line", x, y, swatchW, h, style.colors.border, style.rounding)
+  pushRect(win, "fill", x + 1, y + 1, swatchW - 2, h - 2, color, style.rounding)
+  if tw > 0 then
+    pushText(win, display, x + swatchW + style.innerSpacing, y + fpy,
+      style.colors.text)
+  end
+
+  local edited = { color[1], color[2], color[3] }
+  if n == 4 then edited[4] = color[4] end
+
+  local changed = false
+  if isOpen then
+    beginPopupContent(popId, idText, "popup", nil)
+    local popWin = ctx.currentWindow
+    local channelLabels = { "R", "G", "B", "A" }
+    for i = 1, n do
+      local v, ch = imlove.SliderFloat(channelLabels[i], edited[i], 0, 1)
+      edited[i] = clamp(v, 0, 1)
+      if ch then changed = true end
+    end
+    imlove.Separator()
+    local pw, ph = style.sliderWidth, frameHeight() * 1.5
+    local px, py = itemAddPassive(popWin, pw, ph)
+    pushRect(popWin, "line", px, py, pw, ph, style.colors.border,
+      style.rounding)
+    pushRect(popWin, "fill", px + 1, py + 1, pw - 2, ph - 2, edited,
+      style.rounding)
+    endPopupContent(popWin)
+  end
+
+  if changed then
+    local result = { edited[1], edited[2], edited[3] }
+    -- ColorEdit3 never shows or edits a 4th channel, but a 4-element table
+    -- passed into it keeps whatever alpha it already had (nil if it never
+    -- had one) — "leaves alpha alone" means passed through, not dropped.
+    result[4] = (n == 4) and edited[4] or color[4]
+    return result, true
+  end
+  return color, false
+end
+
+--- A 3-channel (r, g, b) version of ColorEdit4() — same swatch+popup, but
+--- the popup shows only R/G/B sliders; a 4th channel on the table passed
+--- in, if any, always passes through untouched. Equivalent of
+--- ImGui::ColorEdit3().
+function imlove.ColorEdit3(label, color)
+  return colorEdit("ColorEdit3", label, color, 3)
+end
+
+--- A color-swatch button + label; click it to open a popup with a
+--- SliderFloat (0..1) per channel — R, G, B, A — and a live preview swatch.
+--- `color` is {r, g, b, a}; returns a NEW table when changed (never mutates
+--- the one passed in) and the SAME reference back, unchanged, otherwise,
+--- plus a changed flag, same convention as every other value widget:
+---
+---   tint, changed = imlove.ColorEdit4("Tint", tint)
+---
+--- DEVIATION from ImGui: no HSV wheel, no hex input, no right-click
+--- "copy as..." context menu — just the four sliders, in keeping with this
+--- library's modest widget set. Equivalent of ImGui::ColorEdit4().
+function imlove.ColorEdit4(label, color)
+  return colorEdit("ColorEdit4", label, color, 4)
 end
 
 --------------------------------------------------------------------------------

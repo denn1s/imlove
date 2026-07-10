@@ -17,7 +17,7 @@ return function(T, H)
     assert(type(im) == "table", "require must return the module table")
     assert(type(im.Begin) == "function" and type(im.End) == "function")
     assert(type(im.NewFrame) == "function" and type(im.Render) == "function")
-    assert(im._VERSION == "1.4.0")
+    assert(im._VERSION == "1.5.0")
     for k in pairs(_G) do
       assert(before[k], "module leaked a global: " .. tostring(k))
     end

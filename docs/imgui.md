@@ -61,6 +61,11 @@ reference](api.md) are the complete story on their own.
 | `"Label##id"` | same | Identical convention, including in window titles. |
 | `GetItemRectMin/Max()` | same | Return `x, y` instead of `ImVec2`. |
 | `IsItemHovered()` / `IsItemActive()` / `IsItemClicked()` | same | Identical contracts; also well-defined for non-interactive items like `Text()` (`IsItemHovered` is geometric there; `IsItemActive`/`IsItemClicked` are always `false`). |
+| `PushStyleColor(name, color)` / `PopStyleColor(count)` | `ImGui::PushStyleColor(ImGuiCol idx, ImVec4 col)` / `ImGui::PopStyleColor(count)` | `name` is a **string** — one of `GetStyle().colors`'s own field names (camelCase, e.g. `"button"`, `"frameBgHovered"`, `"checkMark"`) — instead of an `ImGuiCol_*` enum constant; see the name table below. An unknown name is an `error()`, ImGui-style typo protection rather than an out-of-range enum. Both are a single **global** stack, not per-window, and must be balanced by `Render()` time (checked there, the same way an unclosed window is), not scoped to `End()`. |
+| `PushStyleVar(name, value)` / `PopStyleVar(count)` | `ImGui::PushStyleVar(ImGuiStyleVar idx, float/ImVec2 val)` / `ImGui::PopStyleVar(count)` | Same string-name-instead-of-enum deviation as `PushStyleColor`. `value`'s shape (plain number vs. `{x, y}` table) must match the field — see the shape table below; several imlove style vars have no exact ImGui counterpart (see notes below). Also a single global stack, balanced by `Render()`. |
+| `GetStyle()` | `ImGui::GetStyle()` | Returns the actual live table every widget reads from (scalars at the top level, `colors` nested underneath) rather than a copy of an internal struct — mutating it directly works, immediately, and is not frame-scoped or balance-checked; that's what `PushStyleVar`/`PushStyleColor` are for. |
+| `ColorEdit3(label, color)` / `ColorEdit4(label, color)` | `ImGui::ColorEdit3(label, float col[3])` / `ImGui::ColorEdit4(label, float col[4])` | `color` is a plain `{r, g, b(, a)}` table (0..1), not a `float[]`; returns a **new** table plus `changed`, instead of mutating in place — same "no mutation" convention as every other table-valued imlove widget. Deliberately modest next to ImGui's: no HSV wheel, no hex `#RRGGBB` input, no right-click "copy as..." menu, no alpha bar/checkerboard preview — just a swatch button that opens a popup with one 0..1 `SliderFloat` per channel and a live preview. `ColorEdit3` never touches a 4th channel already on the table you pass it (kept, not stripped) but never adds one either. |
+| `PushFont(font)` / `PopFont()` | `ImGui::PushFont(ImFont*)` / `ImGui::PopFont()` | Takes a real LÖVE `Font` object (`love.graphics.newFont(...)`) instead of an atlas-baked `ImFont*` — there's no font atlas/glyph-range system to configure, LÖVE's own font loading does that job. Affects measuring (`GetItemRect*`, layout) and drawing identically and immediately, like ImGui's. Also a global stack, balanced by `Render()`. |
 | `io.IniFilename` | `io.IniFilename` | A plain string (default `"imlove.ini"`), not `.ini`-suffix-checked; set `nil`/`false` to disable, same idea as ImGui's `nullptr`. Written via `love.filesystem` (lands in LÖVE's sandboxed save directory), not raw `fopen`. |
 | `SaveIniSettings(filename)` / `LoadIniSettings(filename)` | `ImGui::SaveIniSettingsToDisk`/`LoadIniSettingsFromDisk` (`...ToMemory`/`...FromMemory` have no imlove equivalent) | Same manual-control escape hatch, but imlove already calls the disk-backed forms itself: once from the first `NewFrame()` (load), and write-on-change from `Render()` (a title-drag ending, a resize-grip drag ending, a collapse toggle, or a brand-new window) — not ImGui's periodic timer-based autosave. Persists position, size (only if ever explicit), and collapsed state per window title; never popups/tooltips/children, and never the open/closed (close-button) state. A loaded entry beats a window's cascade default and a `"once"` `SetNextWindowPos()`/`SetNextWindowSize()`, but loses to an explicit `"always"`. |
 | `imlove_demo.lua` / `ShowDemoWindow(open)` | `imgui_demo.cpp` / `ImGui::ShowDemoWindow(p_open)` | Same idea (a self-documenting tour of every widget), but shipped as a separate companion file you `require` yourself — `local ShowDemoWindow = require "imlove_demo"` — rather than a function baked into the library, mirroring how `imgui_demo.cpp` ships as its own translation unit rather than living inside `imgui.cpp`. `open` follows the same value-in/value-out convention as `Begin()`'s. Run it with `love . demo`. |
@@ -69,7 +74,54 @@ reference](api.md) are the complete story on their own.
 
 - **IDs are compared as strings**, not hashed — `PushID(7)` and `PushID("7")`
   are the same ID. In practice this never matters for debug UIs.
-- **One built-in color scheme.** There is no styling API.
+- **One built-in color scheme, but it's fully mutable as of v1.5.** There's
+  no separate style-editor demo (ImGui ships one), but `GetStyle()` /
+  `PushStyleColor()` / `PushStyleVar()` reach the exact same data ImGui's
+  `ImGuiStyle` does — see the equivalence table above and the name/shape
+  tables just below.
+- **Style color names are strings, camelCase, and match `GetStyle().colors`
+  exactly** — not the `ImGuiCol_*` enum. The mapping (imlove name →
+  closest `ImGuiCol_*`):
+
+  | imlove | ImGuiCol |
+  |---|---|
+  | `"text"` | `ImGuiCol_Text` |
+  | `"textDisabled"` | `ImGuiCol_TextDisabled` |
+  | `"windowBg"` | `ImGuiCol_WindowBg` |
+  | `"border"` | `ImGuiCol_Border` |
+  | `"titleBg"` | `ImGuiCol_TitleBg` |
+  | `"titleBgActive"` | `ImGuiCol_TitleBgActive` |
+  | `"frameBg"` | `ImGuiCol_FrameBg` |
+  | `"frameBgHovered"` | `ImGuiCol_FrameBgHovered` |
+  | `"frameBgActive"` | `ImGuiCol_FrameBgActive` |
+  | `"button"` | `ImGuiCol_Button` |
+  | `"buttonHovered"` | `ImGuiCol_ButtonHovered` |
+  | `"buttonActive"` | `ImGuiCol_ButtonActive` |
+  | `"checkMark"` | `ImGuiCol_CheckMark` |
+  | `"sliderGrab"` | `ImGuiCol_SliderGrab` |
+  | `"sliderGrabActive"` | `ImGuiCol_SliderGrabActive` |
+  | `"header"` | `ImGuiCol_Header` |
+  | `"headerHovered"` | `ImGuiCol_HeaderHovered` |
+  | `"separator"` | `ImGuiCol_Separator` |
+
+  That's the full set — imlove has no `ImGuiCol_*` for things it doesn't
+  draw (tabs, docking, plot lines/histograms use `text`, nav highlights,
+  ...).
+- **`PushStyleVar` shape rules** — a plain number for a scalar field, a
+  `{x, y}` table for a pair field; passing the wrong shape is an `error()`,
+  not silent truncation:
+
+  | imlove name | shape | closest ImGuiStyleVar | notes |
+  |---|---|---|---|
+  | `"windowPadding"` | number | `ImGuiStyleVar_WindowPadding` | ImGui's is an `ImVec2` (x and y independently); imlove only ever had one uniform padding value, so this stays a single number rather than gaining a second axis. |
+  | `"framePadding"` | `{x, y}` | `ImGuiStyleVar_FramePadding` | Matches ImGui's `ImVec2` shape exactly. |
+  | `"itemSpacing"` | `{x, y}` | `ImGuiStyleVar_ItemSpacing` | Matches ImGui's `ImVec2` shape exactly. |
+  | `"innerSpacing"` | number | `ImGuiStyleVar_ItemInnerSpacing` | ImGui's is an `ImVec2`; imlove only ever used it as one scalar gap (widget-frame to label), so it stays a single number. |
+  | `"indent"` | number | `ImGuiStyleVar_IndentSpacing` | Matches. |
+  | `"rounding"` | number | `ImGuiStyleVar_FrameRounding` / `WindowRounding` | ImGui has separate frame/window/child/popup/scrollbar/grab rounding vars; imlove has always drawn every rounded corner (window and frame alike) from this one shared value, so pushing it re-themes both at once. |
+  | `"sliderWidth"` | number | *(none)* | No ImGui equivalent — closest in spirit is `ImGuiStyleVar_GrabMinSize`, but that's the grab, not the track; imlove's sliders/drags/combos/color swatches all share one fixed track width instead of ImGui's per-widget `CalcItemWidth()`. |
+  | `"grabWidth"` | number | `ImGuiStyleVar_GrabMinSize`-ish | ImGui's is a *minimum* grab size that can grow; imlove's is a fixed width. |
+
 - **Coordinates are LÖVE screen pixels.** No ImVec2 anywhere; functions take
   and return plain `x, y` pairs.
 - **No menu bar / `BeginMainMenuBar`/`BeginMenu`/`MenuItem`.** Not yet

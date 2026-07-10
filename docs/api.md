@@ -155,6 +155,40 @@ visual and never capture input.
 | `imlove.IsItemActive()` | `bool` | Is the most recent item currently held down by the mouse? Always `false` for non-interactive items. |
 | `imlove.IsItemClicked()` | `bool` | Was the most recent item clicked this frame — its own notion of a completed click (e.g. `Button`'s release-over-it, `TreeNode`'s toggle). Always `false` for non-interactive items. |
 
+### Style
+
+`GetStyle()` returns the one live `style` table every widget already reads
+from; `PushStyleColor`/`PushStyleVar` are the frame-safe way to override a
+piece of it temporarily — both are a single global stack each (not
+per-window), so a themed span is free to cross window boundaries within a
+frame, but every push must be popped by the time `Render()` runs, exactly
+like an unbalanced `PushID()`/`BeginChild()` is caught by `End()`. Unlike
+those, an unbalanced push here doesn't take the whole UI down for the rest of
+the process: `Render()` fully unwinds every remaining `PushStyleColor`/
+`PushStyleVar`/`PushFont` entry (restoring the colors/vars/font they
+shadowed, in LIFO order) *before* erroring, so a caller that wraps `Render()`
+in `pcall` gets a loud error every frame the mistake is present, but the UI
+and its theme keep working meanwhile. See `docs/imgui.md` for the full
+color-name and style-var-name tables.
+
+`windowPadding` specifically is sampled once, by `Begin()` — not re-read for
+the rest of that window's life. Push it *before* `Begin()` to pad a window;
+pushing it after `Begin()` (even if popped again before the matching `End()`,
+so `Render()` never complains) has no effect on that window at all, since its
+margin and auto-fit size were already locked in.
+
+| Function | Returns | Description |
+|---|---|---|
+| `imlove.PushStyleColor(name, color)` | — | Push a `{r, g, b, a}` override for `GetStyle().colors[name]` — e.g. `"button"`, `"text"`, `"frameBg"`. An unknown `name` is an `error()`. |
+| `imlove.PopStyleColor(count)` | — | Pop `count` (default `1`) color overrides, restoring each one. |
+| `imlove.PushStyleVar(name, value)` | — | Push an override for one of `GetStyle()`'s scalar/pair fields: a plain number for `windowPadding`, `innerSpacing`, `indent`, `rounding`, `sliderWidth`, `grabWidth`; a `{x, y}` table for `framePadding`/`itemSpacing`. An unknown `name`, or a `value` of the wrong shape, is an `error()`. |
+| `imlove.PopStyleVar(count)` | — | Pop `count` (default `1`) style var overrides, restoring each one. |
+| `imlove.GetStyle()` | `style` | The live style table (scalar fields at the top level, a `colors` sub-table underneath) — the same one every widget reads from. Mutating it directly takes effect immediately and is **not** caught by `Render()`'s balance check if you forget to undo it; reach for this only for a one-time theme setup (e.g. right after `require "imlove"`), and use `PushStyleColor`/`PushStyleVar` for anything scoped to part of a frame. |
+| `imlove.ColorEdit3(label, color)` | `color, changed` | The 3-channel (`{r, g, b}`) version of `ColorEdit4` below — same swatch + popup, only R/G/B sliders. A 4th channel on the table passed in, if any, always passes through untouched (never edited, never dropped). |
+| `imlove.ColorEdit4(label, color)` | `color, changed` | A color-swatch button + label; click it to open a popup with a `SliderFloat` (0..1) per channel (R, G, B, A) and a live preview swatch. `color` is `{r, g, b, a}`. Returns a **new** table when changed — never mutates the one passed in, the same "no mutation" convention every table-valued widget in this library follows — and the same reference back, unchanged, otherwise. No HSV wheel, no hex input, no right-click "copy as..." menu — just the four sliders. |
+| `imlove.PushFont(font)` | — | Push a LÖVE `Font` object (e.g. `love.graphics.newFont(...)`): every `GetItemRect*`-visible measurement and every widget drawn until the matching `PopFont()` uses it instead of the library's own default font. `font` must look like a `Font` (non-nil, with `getWidth`/`getHeight`) — anything else is an `error()` immediately, rather than crashing frames later inside `textSize()`. |
+| `imlove.PopFont()` | — | Pop the font pushed by `PushFont()`, restoring whichever font was active before it. |
+
 ### Settings persistence
 
 Mirrors Dear ImGui's `imgui.ini`: each window's position, collapsed state,
