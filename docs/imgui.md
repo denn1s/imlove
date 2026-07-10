@@ -36,7 +36,7 @@ reference](api.md) are the complete story on their own.
 | `DragInt(label, v, speed, min, max)` | `ImGui::DragInt(label, int* v, speed, min, max, fmt, flags)` | Same deviations as `DragFloat`; `speed` defaults to `1`; fixed `%d` display. |
 | `ProgressBar(fraction, w, h, overlay)` | `ImGui::ProgressBar(fraction, size, overlay)` | `w, h` instead of an `ImVec2 size`; `overlay` defaults to a centered `"NN%"` string instead of ImGui's `NULL` (which shows nothing). |
 | `TreeNode(label)` / `TreePop()` | same | Identical contract, including the implicit ID push while open. |
-| `CollapsingHeader(label)` | `ImGui::CollapsingHeader(label, flags)` | Returns just `open` (no `p_open`/close-button form). Simplified relative to real ImGui: always full-width, no indent, and — unlike `TreeNode` — no ID-stack push, so no matching `TreePop()`. |
+| `CollapsingHeader(label, defaultOpen)` | `ImGui::CollapsingHeader(label, flags)` | Returns just `open` (no `p_open`/close-button form). `defaultOpen` is a plain boolean seed for the *first* time this id is ever seen, equivalent to passing `ImGuiTreeNodeFlags_DefaultOpen` — not a bitmask. Simplified relative to real ImGui: always full-width, no indent, and — unlike `TreeNode` — no ID-stack push, so no matching `TreePop()`. |
 | `Selectable(label, selected)` | `ImGui::Selectable(label, selected)` | No size/flags. |
 | `Separator()` | same | Identical contract. |
 | `Spacing()` / `NewLine()` / `Dummy(w, h)` | same | Identical contracts. |
@@ -57,6 +57,9 @@ reference](api.md) are the complete story on their own.
 | `"Label##id"` | same | Identical convention, including in window titles. |
 | `GetItemRectMin/Max()` | same | Return `x, y` instead of `ImVec2`. |
 | `IsItemHovered()` / `IsItemActive()` / `IsItemClicked()` | same | Identical contracts; also well-defined for non-interactive items like `Text()` (`IsItemHovered` is geometric there; `IsItemActive`/`IsItemClicked` are always `false`). |
+| `io.IniFilename` | `io.IniFilename` | A plain string (default `"imlove.ini"`), not `.ini`-suffix-checked; set `nil`/`false` to disable, same idea as ImGui's `nullptr`. Written via `love.filesystem` (lands in LÖVE's sandboxed save directory), not raw `fopen`. |
+| `SaveIniSettings(filename)` / `LoadIniSettings(filename)` | `ImGui::SaveIniSettingsToDisk`/`LoadIniSettingsFromDisk` (`...ToMemory`/`...FromMemory` have no imlove equivalent) | Same manual-control escape hatch, but imlove already calls the disk-backed forms itself: once from the first `NewFrame()` (load), and write-on-change from `Render()` (a title-drag ending, a resize-grip drag ending, a collapse toggle, or a brand-new window) — not ImGui's periodic timer-based autosave. Persists position, size (only if ever explicit), and collapsed state per window title; never popups/tooltips/children, and never the open/closed (close-button) state. A loaded entry beats a window's cascade default and a `"once"` `SetNextWindowPos()`/`SetNextWindowSize()`, but loses to an explicit `"always"`. |
+| `imlove_demo.lua` / `ShowDemoWindow(open)` | `imgui_demo.cpp` / `ImGui::ShowDemoWindow(p_open)` | Same idea (a self-documenting tour of every widget), but shipped as a separate companion file you `require` yourself — `local ShowDemoWindow = require "imlove_demo"` — rather than a function baked into the library, mirroring how `imgui_demo.cpp` ships as its own translation unit rather than living inside `imgui.cpp`. `open` follows the same value-in/value-out convention as `Begin()`'s. Run it with `love . demo`. |
 
 ## Other deviations worth knowing
 

@@ -7,6 +7,8 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+## [1.3.0] - 2026-07-10
+
 Overlays — the popup release: tooltips, popups, and modals, all drawn in a
 new overlay layer above every regular window, plus `Combo`/`ListBox` built on
 top of that same machinery. Every existing name and signature only gained
@@ -54,6 +56,50 @@ optional trailing arguments; nothing that worked in v1.2 changes behavior.
   rules, tooltip hit-testing and last-call-wins, `Combo`, `ListBox`, and the
   `WantCaptureMouse`/forwarder matrix while any popup is open
   (`tests/test_popups.lua`).
+- `imlove.io.IniFilename` / `imlove.SaveIniSettings(filename)` /
+  `imlove.LoadIniSettings(filename)` — settings persistence mirroring Dear
+  ImGui's `imgui.ini`: each window's position, collapsed state, and (only if
+  ever explicitly sized) its size survive across runs, keyed by window
+  title, in a small ImGui-ini-flavored text file written via
+  `love.filesystem`. Loaded automatically on the first `NewFrame()`, saved
+  automatically whenever something worth persisting changes (a drag or
+  resize ends, a collapse toggles, a new window appears); `IniFilename`
+  defaults to `"imlove.ini"`, and `nil`/`false` disables persistence
+  entirely. Popups, tooltips, children, and open/closed (close-button)
+  state are never persisted.
+- `imlove.CollapsingHeader(label, defaultOpen)` gained an optional
+  `defaultOpen` argument — seeds the very first time this id is ever seen
+  (like `ImGuiTreeNodeFlags_DefaultOpen`), and never overrides whatever the
+  user has since clicked it to.
+- `imlove_demo.lua` — a new companion file at the repo root, mirroring Dear
+  ImGui's `imgui_demo.cpp`: `local ShowDemoWindow = require "imlove_demo"`
+  returns a single function, `open = ShowDemoWindow(open)`, building a
+  self-documenting "imlove Demo" window out of nothing but imlove's public
+  API. Run it with `love . demo` (see the new `examples/demo.lua`, a thin
+  driver showing the same open/reopen round trip any `Begin()` caller
+  handles).
+- 20 new headless tests: settings persistence lifecycle, ini text parsing,
+  and load/save round trips (`tests/test_settings.lua`); and a full,
+  clicks-and-all tour of `imlove_demo.lua` itself — every widget, every
+  popup kind, and a second window, all driven headless
+  (`tests/test_demo.lua`).
+
+### Fixed
+
+- The content clip rect from the previous frame could leak into the very
+  start of the next frame's hit-testing, before the current frame's own
+  clip was established.
+- `LoadIniSettings()` truncated a window's saved `Size=w,h` line at the
+  first `and`-like token boundary inside `parseIniText`, silently dropping
+  the height half of the pair.
+- A window closed via its title-bar close button and then reopened by the
+  caller (`open = true` again — the exact round trip `imlove_demo.lua` and
+  its own callers use) stayed reported as closed forever after:
+  `win.closedThisFrame` was only ever reset with `... or false`, which
+  patches away a `nil` but never clears a stale `true` left over from the
+  frame the close button was actually clicked. It's now reset
+  unconditionally at the top of `Begin()`, before the close button's own
+  hit-test runs.
 
 ### Changed
 

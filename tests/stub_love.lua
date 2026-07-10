@@ -7,7 +7,8 @@ record their calls into `stub.calls` instead of drawing, so tests can assert
 on what would have been drawn.
 ]]
 
-local stub = { mouseX = 0, mouseY = 0, calls = {}, screenW = 800, screenH = 600 }
+local stub = { mouseX = 0, mouseY = 0, calls = {}, screenW = 800, screenH = 600,
+  files = {} } -- love.filesystem's in-memory backing store: name -> contents
 
 local font = {}
 function font:getWidth(text) return #tostring(text) * 7 end
@@ -45,10 +46,38 @@ stub.font = font
 function stub.install()
   local calls = stub.calls
   stub.scissor = nil
+  -- A fresh in-memory "disk" every install() (i.e. every H.fresh()) — tests
+  -- get file isolation the same way they get isolation from every other
+  -- piece of module state. Tests that specifically want a file to survive
+  -- a fresh imlove module reload (settings persistence round-trips) must
+  -- re-require "imlove" directly instead of going through H.fresh(), so
+  -- this store is left untouched — see tests/test_settings.lua.
+  stub.files = {}
   local function record(name)
     return function(...) calls[#calls + 1] = { name, ... } end
   end
   love = {
+    filesystem = {
+      -- Mirrors love.filesystem.read(name): returns contents, size on
+      -- success, or nil, errormsg if the "file" doesn't exist — same
+      -- contract as the real thing, so imlove.lua's defensive handling
+      -- gets genuinely exercised.
+      read = function(name)
+        local data = stub.files[name]
+        if data == nil then return nil, "could not open file " .. tostring(name) end
+        return data, #data
+      end,
+      write = function(name, data)
+        stub.files[name] = data
+        return true
+      end,
+      getInfo = function(name)
+        local data = stub.files[name]
+        if data == nil then return nil end
+        return { type = "file", size = #data }
+      end,
+      getSaveDirectory = function() return "/tmp/imlove-test-save" end,
+    },
     graphics = {
       getFont   = function() return font end,
       newFont   = function() return font end,
@@ -77,6 +106,11 @@ function stub.install()
     },
     mouse = {
       getPosition = function() return stub.mouseX, stub.mouseY end,
+    },
+    timer = {
+      -- Fixed fake delta: deterministic, and non-zero so anything that
+      -- divides by dt (or accumulates a phase) behaves sanely under test.
+      getDelta = function() return 1 / 60 end,
     },
   }
 end

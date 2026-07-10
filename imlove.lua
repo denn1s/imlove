@@ -47,6 +47,12 @@ local imlove = { _VERSION = "1.3.0" }
 imlove.io = {
   WantCaptureMouse    = false,
   WantCaptureKeyboard = false, -- always false in v1: no keyboard widgets yet
+  -- Settings persistence (see "Settings persistence" below, and
+  -- SaveIniSettings()/LoadIniSettings()): the file window position/size/
+  -- collapsed state is saved to and loaded from, via love.filesystem.
+  -- Mirrors ImGui's io.IniFilename. Set to nil or false before your first
+  -- NewFrame() to disable persistence entirely.
+  IniFilename = "imlove.ini",
 }
 
 --------------------------------------------------------------------------------
@@ -133,6 +139,14 @@ local ctx = {
   releaseLatch    = false,
   rightPressLatch = false, -- right-button press latch, for BeginPopupContextItem
   wheelLatch      = 0, -- accumulated wheelmoved() dy, consumed by NewFrame()
+
+  -- Settings persistence (see the "Settings persistence" section below).
+  iniLoaded  = false, -- whether the lazy first-NewFrame() load has run yet
+  iniEntries = nil,   -- title -> {x, y, w, h, sized, collapsed}, from the
+                      -- most recently loaded ini file; consulted by Begin()
+                      -- when a window is first created (or re-applied to
+                      -- already-existing windows by LoadIniSettings())
+  iniDirty   = false, -- true when something changed that's worth writing
 }
 
 --------------------------------------------------------------------------------
@@ -531,6 +545,16 @@ function imlove.NewFrame()
   -- scene unloading — and the UI would then draw with a dead object.
   ctx.font = ctx.font or love.graphics.newFont(13)
 
+  -- Settings persistence: load once, lazily, the very first frame (never
+  -- again after that — see LoadIniSettings() for reloading on demand).
+  -- ctx.windows is always empty at this point (Begin() can't have run
+  -- before the first NewFrame()), so there's nothing yet to re-apply to —
+  -- just seed ctx.iniEntries for Begin() to consult as windows are created.
+  if not ctx.iniLoaded then
+    ctx.iniLoaded = true
+    if imlove.io.IniFilename then imlove.LoadIniSettings() end
+  end
+
   local m = ctx.mouse
   m.x, m.y = love.mouse.getPosition()
   m.pressed, ctx.pressLatch = ctx.pressLatch, false
@@ -744,6 +768,157 @@ function imlove.Render()
   if psx then g.setScissor(psx, psy, psw, psh) else g.setScissor() end
   g.setFont(prevFont)
   g.setColor(pr, pg, pb, pa)
+
+  -- Settings persistence: write-on-change, no debounce timer (see the
+  -- "Settings persistence" section above) — only actually touches disk
+  -- when something changed AND persistence is still enabled.
+  if ctx.iniDirty and imlove.io.IniFilename then
+    imlove.SaveIniSettings()
+  end
+end
+
+--------------------------------------------------------------------------------
+-- Settings persistence: ImGui's .ini behavior via love.filesystem. What
+-- persists, per window title, is position, collapsed state, and — only for
+-- a window that was ever given an EXPLICIT size (see the sizing model in
+-- Begin()'s doc comment) — its size. Popups, tooltips, and BeginChild()
+-- regions are never persisted; they aren't windows in ctx.windows/
+-- ctx.windowOrder to begin with. The caller-owned open/close (close-button)
+-- state is deliberately NOT persisted either, exactly like ImGui: `open` is
+-- yours to remember, not the library's.
+--
+-- Precedence when a window is first created (see Begin()): an "always"
+-- SetNextWindowPos()/SetNextWindowSize() always wins; a "once" one only
+-- wins when there is NO ini entry for that title — otherwise the ini
+-- position/size applies instead, exactly as if "once" had already fired
+-- once before your code ever ran. This falls out of reusing the same
+-- win.placed/win.sizePlaced bookkeeping Begin() already had for "once".
+--
+-- Lifecycle is deliberately simple, no timers: LOAD once, lazily, at the
+-- first NewFrame() (tolerating an absent or garbage file silently). SAVE
+-- write-on-change instead of ImGui's ~5s debounce: a title drag ending, a
+-- resize-grip drag ending, a collapse toggle, or a brand-new window all
+-- mark ctx.iniDirty, and Render() writes the whole file whenever it's
+-- dirty. Simpler than debouncing, at the cost of an extra disk write on
+-- some frames a real game would consider "still settling" — a fine trade
+-- for a debug UI, and documented as a deviation (see docs/imgui.md).
+--------------------------------------------------------------------------------
+
+-- Parses an ImGui-ini-flavored file defensively: unrecognized/malformed
+-- lines are simply ignored rather than erroring, and any block missing a
+-- Pos= line (a truncated or hand-edited file) is discarded entirely, so a
+-- garbage file just behaves like an empty/absent one.
+local function parseIniText(text)
+  local entries = {}
+  local current = nil
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    line = line:gsub("\r$", "")
+    local title = line:match("^%[Window%]%[(.*)%]$")
+    if title then
+      current = { collapsed = false }
+      entries[title] = current
+    elseif current then
+      local x, y = line:match("^Pos=([%-%d%.]+),([%-%d%.]+)$")
+      -- Each match() above/below is its own statement (not chained with
+      -- "and") so both capture groups survive: "and" truncates a multi-
+      -- value function call to its first result, which would silently
+      -- discard the second half of every Pos=/Size= pair.
+      local w, h
+      if not x then w, h = line:match("^Size=([%-%d%.]+),([%-%d%.]+)$") end
+      local c
+      if not x and not w then c = line:match("^Collapsed=(%d)$") end
+      if x then
+        current.x, current.y = tonumber(x), tonumber(y)
+      elseif w then
+        current.w, current.h = tonumber(w), tonumber(h)
+        current.sized = true
+      elseif c then
+        current.collapsed = c ~= "0"
+      end
+    end
+  end
+  for title, e in pairs(entries) do
+    if not e.x or not e.y then entries[title] = nil end -- incomplete: discard
+  end
+  return entries
+end
+
+-- The inverse of parseIniText(): one [Window][Title] block per window ever
+-- created this session (ctx.windowOrder — root windows only, see above),
+-- in the same z-order they're kept in (harmless; ImGui's own order isn't
+-- meaningful either, since Begin()/End() never reads back by position).
+local function serializeIniText()
+  local lines = {}
+  for i = 1, #ctx.windowOrder do
+    local win = ctx.windowOrder[i]
+    lines[#lines + 1] = "[Window][" .. win.title .. "]"
+    lines[#lines + 1] = string.format("Pos=%d,%d",
+      math.floor(win.x + 0.5), math.floor(win.y + 0.5))
+    if win.sizeMode == "fixed" then
+      lines[#lines + 1] = string.format("Size=%d,%d",
+        math.floor(win.w + 0.5), math.floor(win.h + 0.5))
+    end
+    if win.collapsed then
+      lines[#lines + 1] = "Collapsed=1"
+    end
+    lines[#lines + 1] = ""
+  end
+  return table.concat(lines, "\n")
+end
+
+-- Applies one parsed entry to an already-existing window table (used both
+-- by Begin() the moment a window is first created, and by
+-- LoadIniSettings() reapplying a freshly (re)loaded file to windows that
+-- already exist). Sets win.placed/win.sizePlaced the same way a consumed
+-- SetNextWindowPos()/SetNextWindowSize() "once" would, so a later "once"
+-- call correctly finds itself too late (see the precedence note above).
+local function applyIniEntryToWindow(win)
+  local entry = ctx.iniEntries and ctx.iniEntries[win.title]
+  if not entry then return end
+  win.x, win.y = entry.x, entry.y
+  win.placed = true
+  win.collapsed = entry.collapsed or false
+  if entry.sized then
+    win.w, win.h = entry.w, entry.h
+    win.sizeMode = "fixed"
+    win.sizePlaced = true
+  end
+end
+
+--- Manually write the current window settings (position, collapsed state,
+--- and size for any explicitly-sized window) to disk now, bypassing the
+--- normal write-on-change lifecycle. filename defaults to
+--- imlove.io.IniFilename; a no-op if that's also nil/false, or if
+--- love.filesystem isn't available. Equivalent of
+--- ImGui::SaveIniSettingsToDisk().
+function imlove.SaveIniSettings(filename)
+  filename = filename or imlove.io.IniFilename
+  if not filename then return end
+  if not (love and love.filesystem and love.filesystem.write) then return end
+  love.filesystem.write(filename, serializeIniText())
+  ctx.iniDirty = false
+end
+
+--- Manually (re)load window settings from disk now and apply them to any
+--- window that already exists, in addition to seeding windows created from
+--- here on (exactly like the lazy load NewFrame() performs once at
+--- startup). filename defaults to imlove.io.IniFilename; a no-op if that's
+--- also nil/false, if love.filesystem isn't available, or if the file is
+--- absent/unreadable — corrupt or partial files are tolerated, parsed
+--- defensively line-by-line (see parseIniText() above). Equivalent of
+--- ImGui::LoadIniSettingsFromDisk().
+function imlove.LoadIniSettings(filename)
+  filename = filename or imlove.io.IniFilename
+  if not filename then return end
+  local fs = love and love.filesystem
+  if not (fs and fs.read) then return end
+  if fs.getInfo and not fs.getInfo(filename) then return end
+  local ok, contents = pcall(fs.read, filename)
+  if not ok or type(contents) ~= "string" then return end
+  ctx.iniEntries = parseIniText(contents)
+  for _, win in pairs(ctx.windows) do
+    applyIniEntryToWindow(win)
+  end
 end
 
 --------------------------------------------------------------------------------
@@ -860,6 +1035,12 @@ function imlove.Begin(title, open, flags)
     ctx.windowCount = ctx.windowCount + 1
     ctx.windows[title] = win
     ctx.windowOrder[#ctx.windowOrder + 1] = win
+    -- A loaded ini entry (see LoadIniSettings()) beats the cascade default
+    -- above, and — via win.placed/win.sizePlaced — beats a "once"
+    -- SetNextWindowPos()/SetNextWindowSize() below too (see the "Settings
+    -- persistence" section's precedence note).
+    applyIniEntryToWindow(win)
+    ctx.iniDirty = true -- a brand-new window is worth persisting
   end
   if win.lastFrame == ctx.frame then
     error("imlove.Begin('" .. title .. "') called twice in one frame", 2)
@@ -930,11 +1111,36 @@ function imlove.Begin(title, open, flags)
   if not hasTitleBar then win.collapsed = false end
   win.titleBarH = hasTitleBar and win.titleH or 0
 
+  -- Reset before the close button's behavior() check below can set it back
+  -- to true: "or false" (formerly here) would only ever patch a nil away,
+  -- never a stale `true` left over from the frame the X was actually
+  -- clicked — without this, closing a window once and then reopening it
+  -- (the caller flips `open` back to true, the exact round trip
+  -- ShowDemoWindow() and its own callers use) would report closedThisFrame
+  -- forever after, even though no new click ever happened.
+  win.closedThisFrame = false
+
+  -- Clear last frame's content clip rect before any chrome hit-testing runs
+  -- below (drag zone, resize grip, collapse arrow, close button). Chrome
+  -- lives outside the scissored content region, so it must never be gated by
+  -- withinClip() — leaving last frame's clip in place here (it's only
+  -- recomputed further down, once this frame's own w/h are settled) would
+  -- otherwise make title-bar chrome unclickable on any fixed-size window,
+  -- since the content clip rect always excludes the title bar's y range.
+  win.clipRect = nil
+
   -- If this window is being dragged, follow the mouse (before drawing
   -- anything, so there is no visible lag).
   if ctx.dragWindow == win then
     win.x = ctx.mouse.x - win.dragOffsetX
     win.y = ctx.mouse.y - win.dragOffsetY
+    if ctx.mouse.released then
+      -- The title-bar drag ends this frame: settle here instead of
+      -- waiting for NewFrame()'s idle-frame safety net (see
+      -- releaseIfActive()'s comment), and persist the new position.
+      ctx.dragWindow = nil
+      ctx.iniDirty = true
+    end
   end
 
   -- Same idea for an in-progress resize (dragging the corner grip): apply
@@ -959,6 +1165,7 @@ function imlove.Begin(title, open, flags)
       win.sizeMode = "fixed"
     elseif ctx.resizeWindow == win then
       ctx.resizeWindow = nil
+      ctx.iniDirty = true -- the resize-grip drag just ended: persist the size
     end
   else
     -- "NoResize"/"AlwaysAutoResize" flipped on mid-drag: give up the grip's
@@ -987,7 +1194,10 @@ function imlove.Begin(title, open, flags)
     if collapsible then
       local _, _, arrowClicked = behavior(win, makeId("#COLLAPSE"),
         win.x, win.y, ah, ah)
-      if arrowClicked then win.collapsed = not win.collapsed end
+      if arrowClicked then
+        win.collapsed = not win.collapsed
+        ctx.iniDirty = true
+      end
     else
       -- "NoCollapse" flipped on mid-hold: release, don't go quiet.
       releaseIfActive(makeId("#COLLAPSE"))
@@ -1054,8 +1264,6 @@ function imlove.Begin(title, open, flags)
       win.x + win.w - gs, win.y + win.h,
       win.x + win.w, win.y + win.h, style.colors.border)
   end
-
-  win.closedThisFrame = win.closedThisFrame or false
 
   -- Reset the layout cursor. skipItems makes every widget a cheap no-op
   -- while the window is collapsed (same trick as ImGui's SkipItems).
@@ -2143,12 +2351,17 @@ end
 ---   end
 ---
 --- Open state persists across frames, keyed like every other widget id.
---- Equivalent of ImGui::CollapsingHeader().
-function imlove.CollapsingHeader(label)
+--- defaultOpen (optional, default false) only matters the very first time
+--- this id is ever seen — like ImGui's ImGuiTreeNodeFlags_DefaultOpen, it
+--- seeds the initial state, and never overrides whatever the user has since
+--- clicked it to.
+--- Equivalent of ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen).
+function imlove.CollapsingHeader(label, defaultOpen)
   local win = requireWindow("CollapsingHeader")
   if win.skipItems then return false end
   local display, idText = splitLabel(label)
   local id = makeId(idText)
+  if ctx.openNodes[id] == nil then ctx.openNodes[id] = defaultOpen == true end
   local open = ctx.openNodes[id] == true
   local fpx, fpy = style.framePadding[1], style.framePadding[2]
   local h = frameHeight()

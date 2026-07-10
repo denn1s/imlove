@@ -6,6 +6,10 @@ conventions these tables assume (labels double as identity, `value, changed =
 Widget(...)` instead of pointer output params, and so on) — read those first
 if you haven't.
 
+Want to see all of this exercised at once? `imlove_demo.lua` (repo root) is a
+companion file that builds a self-documenting "imlove Demo" window from
+nothing but this public API — see its header comment, or run `love . demo`.
+
 ### Frame lifecycle
 
 | Function | Description |
@@ -81,7 +85,7 @@ A window auto-fits its content, exactly like v1.1, until it's given an explicit 
 | `imlove.ProgressBar(fraction, w, h, overlay)` | — | A bar filled to `fraction` (clamped 0..1). `w`/`h` default to the slider width and frame height; `overlay` defaults to a centered `"NN%"` label. |
 | `imlove.TreeNode(label)` | `open` | Collapsible node; open state persists. When `open`, children are indented and the label is pushed on the ID stack — call `TreePop()` after them. |
 | `imlove.TreePop()` | — | Close the innermost open `TreeNode`. Call once per `TreeNode` that returned `true`. |
-| `imlove.CollapsingHeader(label)` | `open` | Like `TreeNode`, but full-width and framed, with no indent and no ID-stack push — no matching `TreePop()`. Open state persists. |
+| `imlove.CollapsingHeader(label, defaultOpen)` | `open` | Like `TreeNode`, but full-width and framed, with no indent and no ID-stack push — no matching `TreePop()`. Open state persists. `defaultOpen` (optional, default `false`) only seeds the very first time this id is ever seen — like ImGui's `ImGuiTreeNodeFlags_DefaultOpen` — and never overrides whatever the user has since clicked it to. |
 | `imlove.Selectable(label, selected)` | `clicked` | Full-width selectable row for pick-one-from-a-list UIs. You own the selection state. |
 | `imlove.Separator()` | — | Horizontal line. |
 | `imlove.Spacing()` | — | A blank vertical gap the size of one item spacing. |
@@ -130,3 +134,23 @@ visual and never capture input.
 | `imlove.IsItemHovered()` | `bool` | Was the most recent item hovered by the mouse this frame? Works for any item, including non-interactive ones like `Text()` (computed from its rectangle rather than a stored hot-state). |
 | `imlove.IsItemActive()` | `bool` | Is the most recent item currently held down by the mouse? Always `false` for non-interactive items. |
 | `imlove.IsItemClicked()` | `bool` | Was the most recent item clicked this frame — its own notion of a completed click (e.g. `Button`'s release-over-it, `TreeNode`'s toggle). Always `false` for non-interactive items. |
+
+### Settings persistence
+
+Mirrors Dear ImGui's `imgui.ini`: each window's position, collapsed state,
+and — only if it was ever explicitly sized — its size, survive across runs,
+keyed by window title, in a small ImGui-ini-flavored text file written via
+`love.filesystem`. Popups, tooltips, children, and the open/closed
+(close-button) state are never persisted.
+
+| Flag / Function | Description |
+|---|---|
+| `imlove.io.IniFilename` | Default `"imlove.ini"`. Set to `nil` or `false` (any time, including before the first `NewFrame()`) to disable persistence entirely — nothing is ever read or written. |
+| `imlove.SaveIniSettings(filename)` | Write current settings now. `filename` defaults to `imlove.io.IniFilename`. Mostly for manual control (e.g. an explicit "Save Layout" button); imlove already calls this on your behalf whenever something worth persisting changes (a drag ends, a resize ends, a window is collapsed/uncollapsed, or a new window is created). |
+| `imlove.LoadIniSettings(filename)` | Read and apply settings now. `filename` defaults to `imlove.io.IniFilename`. imlove already calls this once, automatically, the first time `NewFrame()` runs — you only need this for a manual reload (e.g. a "Reset Layout" button that first deletes the file and then calls `LoadIniSettings()` to clear in-memory state — or, more simply, restart). |
+
+A loaded position/size beats a window's cascading default placement, and
+beats a `SetNextWindowPos()`/`SetNextWindowSize()` whose `cond` is `"once"`
+(the ini entry already counts as "the window has been placed once"); an
+explicit `"always"` still wins over the ini, every frame, same as it wins
+over a `"once"` call.

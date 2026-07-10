@@ -87,11 +87,18 @@ plus focus/dismiss rules. Then, in dependency order:
 
 Not gated on any subsystem; land whenever they're ready:
 
-- `imlove.ShowDemoWindow()` — the most ImGui feature there is: a
-  self-documenting demo built from the library itself, doubling as the
-  kitchen-sink test and a teaching tool.
+- A self-documenting demo built from the library itself, doubling as an
+  integration test and a teaching tool — **shipped in v1.3** as
+  `imlove_demo.lua`, a companion file rather than a library function:
+  `local ShowDemoWindow = require "imlove_demo"` (`love . demo`). A
+  deliberate deviation from the `imlove.ShowDemoWindow()` phrasing above —
+  mirrors how real ImGui ships `imgui_demo.cpp` as its own translation unit,
+  and keeps the demo (and its own bugs) fully outside `imlove.lua`'s v1
+  contract.
 - Settings persistence — ImGui's `.ini` behavior via `love.filesystem`:
-  window positions and collapsed state surviving restarts.
+  window positions and collapsed state surviving restarts. **Shipped in
+  v1.3** as `imlove.io.IniFilename` / `imlove.SaveIniSettings` /
+  `imlove.LoadIniSettings`.
 - Tables/columns (`BeginTable` or legacy `Columns`) — deliberately late:
   it's a lot of layout code, and `SameLine` covers most debug-UI cases.
 

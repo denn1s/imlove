@@ -15,7 +15,9 @@ directly to real Dear ImGui in C++ or any other binding.
 - **No globals.** `require("imlove")` returns the module table; nothing leaks.
 - **MIT licensed.**
 
-To see it in action, run `love .` in this repo for the kitchen-sink demo.
+To see it in action, run `love .` in this repo for the kitchen-sink demo, or
+`love . demo` for imlove's own self-documenting tour of every widget
+(`imlove_demo.lua`, at the repo root, mirrors Dear ImGui's `imgui_demo.cpp`).
 
 ## Quickstart
 
@@ -135,6 +137,8 @@ See `examples/kitchensink.lua` for this running inside an actual game loop
 - [docs/api.md](docs/api.md) — the full function-by-function reference.
 - [docs/imgui.md](docs/imgui.md) — for people coming from Dear ImGui: what
   transfers directly and what's different.
+- [imlove_demo.lua](imlove_demo.lua) — a self-documenting tour of the widgets
+  above, built from nothing but the public API. Run it with `love . demo`.
 - [ROADMAP.md](ROADMAP.md) — what's planned past v1, and what's a deliberate
   non-goal.
 - [CHANGELOG.md](CHANGELOG.md) — release history.
@@ -153,6 +157,7 @@ gain things, they never change.
 ```sh
 love .                   # kitchen-sink example (needs LÖVE 11.5)
 love . game              # a small real-game integration example
+love . demo              # imlove's own demo window (imlove_demo.lua)
 love . <name>            # any examples/<name>.lua
 luajit tests/run.lua     # headless test suite (no LÖVE needed)
 ```
