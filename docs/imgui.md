@@ -44,6 +44,15 @@ reference](api.md) are the complete story on their own.
 | `SameLine(offsetFromStartX, spacing)` | `ImGui::SameLine(offset_from_start_x, spacing)` | Identical contract and defaults; with no arguments, unchanged from v1. |
 | `PlotLines(label, values, scaleMin, scaleMax, w, h, overlay)` | `ImGui::PlotLines(label, values, count, offset, overlay, min, max, size, stride)` | `values` is a plain Lua array (no separate `count`/`stride`/ring-buffer `offset`); `w, h` instead of an `ImVec2 size`; `scaleMin`/`scaleMax` default to nil (auto-range from `values`), matching ImGui's `FLT_MAX` sentinel. |
 | `PlotHistogram(...)` | `ImGui::PlotHistogram(...)` | Same deviations as `PlotLines`. |
+| `Combo(label, value, items)` | `ImGui::Combo(label, int* current_item, items, count)` / `BeginCombo`+`Selectable` loop | `items` is a plain Lua array (no separate `count`); **`value` is a 1-based index**, not 0-based — matches Lua array convention rather than ImGui's C convention. Returns `newValue, changed` instead of mutating a pointer. An out-of-range `value` just shows an empty preview instead of asserting. `changed` is `true` on any pick — including re-picking the item already selected — matching ImGui (it sets `value_changed` on the click itself, not on whether the index moved). Only "opened it, picked nothing, dismissed it" reports `changed = false`. |
+| `ListBox(label, value, items, heightInItems)` | `ImGui::ListBox(label, int* current_item, items, count, height_in_items)` | Same `items`/1-based-`value` deviations as `Combo`, including the same "`changed` is true on any pick, even the already-selected row" rule. Implemented as a thin wrapper over `BeginChild`, so it scrolls the same way any other child does. |
+| `SetTooltip(fmt, ...)` | `ImGui::SetTooltip(fmt, ...)` | `string.format` semantics instead of printf. Drawn in imlove's overlay layer, above every window *and* every open popup (ImGui tooltips are also topmost, so behavior matches). |
+| `BeginTooltip()` / `EndTooltip()` | same | Identical contract. |
+| `OpenPopup(strId)` | `ImGui::OpenPopup(str_id)` | Identical id-scoping rule (resolved against the current ID stack, same as a widget id) — no `ImGuiPopupFlags` overload. |
+| `BeginPopup(strId)` / `EndPopup()` | `ImGui::BeginPopup(str_id)` / `ImGui::EndPopup()` | Identical contract: call `EndPopup()` only when `BeginPopup()` returned `true`. imlove enforces this with an `error()` in both directions (calling it without a successful open, and leaving one open past `End()`/`EndChild()`/`Render()`) rather than leaving it as a documented-but-unchecked convention. No `ImGuiWindowFlags` argument — popups are always auto-fit, no title bar. Tall popup content does not scroll (no internal `BeginChild()`) — a documented deviation; keep popup content short. |
+| `CloseCurrentPopup()` | same | Identical contract. Takes effect for the *next* `BeginPopup()`/`BeginPopupModal()` check — same one-frame lag as every other state change in imlove, so don't expect a local variable capturing an earlier `BeginPopup()` call's return to flip within the same frame you call this. |
+| `BeginPopupContextItem(strId)` | `ImGui::BeginPopupContextItem(str_id)` | Same right-click-over-the-last-item trigger and id-scoping default. No `ImGuiPopupFlags` (e.g. no alternate mouse-button selection — always the right mouse button). |
+| `BeginPopupModal(title)` / `EndPopup()` | `ImGui::BeginPopupModal(name, p_open, flags)` | No `p_open`/close-button form — wire your own Cancel button to `CloseCurrentPopup()`. Always centered (no manual positioning); no `ImGuiWindowFlags`. Otherwise identical semantics: dims and blocks all other input, an outside click does not dismiss it. |
 | `PushID(id)` / `PopID()` | same | Accepts strings and numbers. |
 | `"Label##id"` | same | Identical convention, including in window titles. |
 | `GetItemRectMin/Max()` | same | Return `x, y` instead of `ImVec2`. |
@@ -56,3 +65,19 @@ reference](api.md) are the complete story on their own.
 - **One built-in color scheme.** There is no styling API.
 - **Coordinates are LÖVE screen pixels.** No ImVec2 anywhere; functions take
   and return plain `x, y` pairs.
+- **No menu bar / `BeginMainMenuBar`/`BeginMenu`/`MenuItem`.** Not yet
+  implemented — build a menu-like popup with `BeginPopup()` +
+  `Selectable()`s if you need one today.
+- **A press that dismisses a popup is consumed**, exactly like a press
+  landing on a widget is — your game's own click handlers never see it,
+  even though (unlike a press that lands *on* UI) it didn't land on
+  anything imlove drew.
+- **A `Combo()` dropdown very close to the bottom (or right) screen edge can
+  overlap its own preview box.** A popup's position is decided once, the
+  frame it opens, from the *previous* frame's content size — which for a
+  brand-new popup is still zero, so there's nothing meaningful to clamp or
+  flip against yet at the moment the decision is made. In practice this only
+  bites when the combo box itself sits within a dropdown's height of the
+  screen edge; move the box (or the window it's in) if you hit it. Not
+  worth the extra frame of lag a real fix (measure-then-position) would
+  add for a debug UI.

@@ -7,6 +7,66 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+Overlays — the popup release: tooltips, popups, and modals, all drawn in a
+new overlay layer above every regular window, plus `Combo`/`ListBox` built on
+top of that same machinery. Every existing name and signature only gained
+optional trailing arguments; nothing that worked in v1.2 changes behavior.
+
+### Added
+
+- `imlove.SetTooltip(fmt, ...)` / `imlove.BeginTooltip()` /
+  `imlove.EndTooltip()` — a small auto-fit box that follows the mouse,
+  drawn above absolutely everything (even an open popup), and never
+  hit-testable. Calling `SetTooltip()` more than once in a frame is fine —
+  the last call wins.
+- `imlove.OpenPopup(strId)` / `imlove.BeginPopup(strId)` /
+  `imlove.EndPopup()` — floating, auto-fit, no-title-bar popups, positioned
+  at the mouse when opened, drawn above every regular window. `EndPopup()`
+  must be called only when `BeginPopup()` returned `true`, enforced with an
+  `error()` in both directions. A press outside the topmost open popup
+  closes it (and everything stacked above whatever it did land on, for
+  nested popups) and that dismissing press is consumed, exactly like a
+  press landing on a widget. `imlove.CloseCurrentPopup()` closes whichever
+  popup is currently being built — the usual way to wire an OK/Cancel/pick
+  action.
+- `imlove.BeginPopupContextItem(strId)` — opens a popup on a right-click
+  over the last submitted item, the canonical right-click context menu.
+- `imlove.BeginPopupModal(title)` — a centered, titled popup that dims and
+  blocks input to everything else (`io.WantCaptureMouse` unconditionally
+  `true` while it's open) and is dismissed only by `CloseCurrentPopup()`,
+  never by an outside click.
+- `imlove.Combo(label, value, items)` — a slider-width preview + arrow that
+  opens a dropdown of `Selectable`s on click, built on the same popup
+  machinery. `value` is a **1-based** index into `items`, matching Lua's
+  array convention rather than ImGui's 0-based one; an out-of-range value
+  just shows an empty preview. Returns `newValue, changed`; `changed` is
+  `true` on any pick, including re-picking the item already selected —
+  only opening it and dismissing without picking reports `changed = false`.
+- `imlove.ListBox(label, value, items, heightInItems)` — an always-visible,
+  scrollable list of `Selectable`s (a thin wrapper over `BeginChild`); same
+  1-based `value` convention and changed-on-any-pick semantics as `Combo`.
+  Defaults to 7 visible rows.
+- A right mouse button one-frame press latch, feeding
+  `BeginPopupContextItem()`.
+- 18 new headless tests covering popup/tooltip open-close-dismiss
+  lifecycle, id scoping, `EndPopup()`'s contract errors, nested-popup
+  dismissal, `BeginPopupContextItem`, modal centering/blocking/dismiss
+  rules, tooltip hit-testing and last-call-wins, `Combo`, `ListBox`, and the
+  `WantCaptureMouse`/forwarder matrix while any popup is open
+  (`tests/test_popups.lua`).
+
+### Changed
+
+- `_VERSION` is now `"1.3.0"`.
+
+### Known deviations (documented, not planned for this release)
+
+- No menu bar / `BeginMenu`/`MenuItem` — build a menu-like popup with
+  `BeginPopup()` + `Selectable()`s instead.
+- Popup and `Combo` dropdown content does not scroll if it's taller than
+  the screen — keep it short, or use `ListBox`/`BeginChild` inside one if
+  you need scrolling.
+
 ## [1.2.0] - 2026-07-09
 
 Windows grow up: clipping, scrolling, explicit sizing, and child regions —

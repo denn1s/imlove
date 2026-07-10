@@ -7,7 +7,7 @@ record their calls into `stub.calls` instead of drawing, so tests can assert
 on what would have been drawn.
 ]]
 
-local stub = { mouseX = 0, mouseY = 0, calls = {} }
+local stub = { mouseX = 0, mouseY = 0, calls = {}, screenW = 800, screenH = 600 }
 
 local font = {}
 function font:getWidth(text) return #tostring(text) * 7 end
@@ -53,6 +53,7 @@ function stub.install()
       getFont   = function() return font end,
       newFont   = function() return font end,
       setFont   = record("setFont"),
+      getDimensions = function() return stub.screenW, stub.screenH end,
       getColor  = function() return 1, 1, 1, 1 end,
       setColor  = record("setColor"),
       rectangle = record("rectangle"),
@@ -82,6 +83,14 @@ end
 
 function stub.setMouse(x, y)
   stub.mouseX, stub.mouseY = x, y
+end
+
+-- Sets the stubbed screen size that love.graphics.getDimensions() reports —
+-- what popups/tooltips clamp themselves against. Defaults to 800x600;
+-- stub.install() does not reset this, so call it again in setup() if a test
+-- needs the default restored after a previous test changed it.
+function stub.setScreenSize(w, h)
+  stub.screenW, stub.screenH = w, h
 end
 
 function stub.clearCalls()

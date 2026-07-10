@@ -9,6 +9,10 @@ This is the example to read if you want to see the WantCaptureMouse pattern
 used for real: clicking or dragging inside the "Debug" window must never
 move a circle underneath it. love.mousepressed below checks imlove's return
 value before the game does anything with the click.
+
+v1.3: right-click a row in the "Entities" list for a BeginPopupContextItem()
+context menu (Clone / Reset position / Delete) — the canonical debug-UI use
+for it.
 ]]
 
 local imlove = require "imlove"
@@ -66,14 +70,54 @@ local function debugPanel()
     imlove.Separator()
 
     if imlove.TreeNode("Entities") then
+      -- Deferred instead of acted on immediately: mutating `entities` (or
+      -- spawning into it) mid-ipairs() would be visible to this same
+      -- loop's remaining iterations.
+      local action, actionEntity
       for i, e in ipairs(entities) do
         imlove.PushID(e.id)
         if imlove.Selectable("circle " .. e.id, selected == e) then
           selected = e
         end
+        -- v1.3: BeginPopupContextItem() — right-click this row for a
+        -- context menu, scoped to this entity by the PushID(e.id) above.
+        if imlove.BeginPopupContextItem() then
+          -- Each pick closes the menu itself instead of leaving it open
+          -- until an outside click dismisses it.
+          if imlove.Selectable("Clone", false) then
+            action, actionEntity = "clone", e
+            imlove.CloseCurrentPopup()
+          end
+          if imlove.Selectable("Reset position", false) then
+            action, actionEntity = "reset", e
+            imlove.CloseCurrentPopup()
+          end
+          if imlove.Selectable("Delete", false) then
+            action, actionEntity = "delete", e
+            imlove.CloseCurrentPopup()
+          end
+          imlove.EndPopup()
+        end
         imlove.PopID()
       end
       imlove.TreePop()
+
+      if action == "clone" then
+        local clone = spawn()
+        clone.x, clone.y = actionEntity.x, actionEntity.y
+        clone.radius, clone.speed, clone.hue =
+          actionEntity.radius, actionEntity.speed, actionEntity.hue
+        selected = clone
+      elseif action == "reset" then
+        actionEntity.x = math.random(40, WORLD_W - 40)
+        actionEntity.y = math.random(40, WORLD_H - 40)
+      elseif action == "delete" then
+        for i, e in ipairs(entities) do
+          if e == actionEntity then table.remove(entities, i) break end
+        end
+        if selected == actionEntity then selected = nil end
+        if dragging == actionEntity then dragging = nil end
+      end
     end
     imlove.Separator()
 

@@ -37,7 +37,7 @@ Two classic IMGUI idioms show up throughout, worth knowing:
 MIT License — see LICENSE.
 ------------------------------------------------------------------------------]]
 
-local imlove = { _VERSION = "1.2.0" }
+local imlove = { _VERSION = "1.3.0" }
 
 -- io mirrors Dear ImGui's ImGuiIO flags. After NewFrame() these tell the host
 -- game whether the UI wants the mouse/keyboard this frame, so the game can
@@ -116,13 +116,23 @@ local ctx = {
   openNodes = {},      -- TreeNode/CollapsingHeader id -> true while open
   dragAnchor = nil,    -- { id, x, value } drag origin for DragFloat/DragInt
 
+  -- Popups & tooltips (see the "Popups & tooltips" section below): drawn in
+  -- an overlay band above every window, and hit-tested before them.
+  popups     = {},     -- resolved popup id -> persistent { win, kind, ... }
+  popupOrder = {},     -- open popup ids, oldest/bottommost first (last =
+                       -- topmost) — also the z-order Render() plays back
+  tooltipWin = nil,    -- the one persistent tooltip "window", reused by
+                       -- every SetTooltip()/BeginTooltip() call
+
   -- Mouse state. LÖVE delivers presses/releases as events between frames, so
   -- the forwarding functions only *latch* them here; NewFrame() converts each
   -- latch into a one-frame `pressed`/`released` flag that widgets read.
-  mouse = { x = 0, y = 0, down = false, pressed = false, released = false },
-  pressLatch   = false,
-  releaseLatch = false,
-  wheelLatch   = 0, -- accumulated wheelmoved() dy, consumed by NewFrame()
+  mouse = { x = 0, y = 0, down = false, pressed = false, released = false,
+    rightPressed = false },
+  pressLatch      = false,
+  releaseLatch    = false,
+  rightPressLatch = false, -- right-button press latch, for BeginPopupContextItem
+  wheelLatch      = 0, -- accumulated wheelmoved() dy, consumed by NewFrame()
 }
 
 --------------------------------------------------------------------------------
@@ -257,6 +267,93 @@ local function bringToFront(win)
       return
     end
   end
+end
+
+--------------------------------------------------------------------------------
+-- Popup bookkeeping used by hit-testing and NewFrame() (must come before
+-- Frame lifecycle, below, since NewFrame() calls into it). The functions
+-- that actually BUILD a popup's contents — beginPopupContent()/
+-- endPopupContent() — live further down, right before Begin()/End(), since
+-- they need pushRect()/itemAdd()/style, and the public
+-- OpenPopup()/BeginPopup()/EndPopup()/SetTooltip() API sits there too.
+--------------------------------------------------------------------------------
+
+-- What's currently open, for Begin()/End()/Render()'s "you forgot to close
+-- something" errors — one place so all three agree on wording.
+local function whatIsOpen(win)
+  if win.isChild then
+    return "BeginChild('" .. win.idStr .. "') is open — missing imlove.EndChild()"
+  elseif win.isTooltip then
+    return "a tooltip is open — missing imlove.EndTooltip()"
+  elseif win.isPopup then
+    return "a popup is open — missing imlove.EndPopup()"
+  else
+    return "window '" .. win.title .. "' is open — missing imlove.End()"
+  end
+end
+
+-- OpenPopup(strId)/BeginPopup(strId) share an id the same way any other
+-- widget does: the current ID stack (window/PushID/BeginPopup scope) joined
+-- with the string, via the same makeId() every widget uses. Two windows
+-- each calling OpenPopup("options") get two different popups; a
+-- BeginPopup("options") called from the same scope as the OpenPopup() that
+-- opened it always finds it.
+local function popupId(strId)
+  return makeId(tostring(strId))
+end
+
+local function popupIsOpen(id)
+  for i = 1, #ctx.popupOrder do
+    if ctx.popupOrder[i] == id then return true end
+  end
+  return false
+end
+
+-- Marks a (resolved) id open: pushes it onto the top of the popup stack and
+-- captures where it should appear (anchorX/Y default to just past the
+-- mouse, SetTooltip()-style; Combo() passes its own box's position
+-- instead). ownerRect, if given (Combo() uses this), is a widget rectangle
+-- that counts as "inside" the popup for dismissal purposes, so clicking the
+-- combo box itself to close its dropdown is never also seen as an
+-- outside-dismiss click.
+local function openPopupById(id, kind, ownerRect, anchorX, anchorY)
+  if popupIsOpen(id) then return end
+  local p = ctx.popups[id] or { id = id }
+  ctx.popups[id] = p
+  p.kind = kind or "popup"
+  p.anchorX = anchorX or ctx.mouse.x + 12
+  p.anchorY = anchorY or ctx.mouse.y + 12
+  p.justOpened = true
+  p.ownerRect = ownerRect
+  ctx.popupOrder[#ctx.popupOrder + 1] = id
+end
+
+local function closePopup(id)
+  for i = 1, #ctx.popupOrder do
+    if ctx.popupOrder[i] == id then
+      table.remove(ctx.popupOrder, i)
+      return
+    end
+  end
+end
+
+-- Frontmost popup/modal under the point — popups are hit-tested BEFORE
+-- regular windows, topmost (most recently opened) first (see NewFrame()).
+-- Never returns the tooltip; it is never hit-testable (see SetTooltip()).
+-- The second return, `blocked`, is true when the point fell through to an
+-- open modal without landing on it (or on anything stacked above it): the
+-- modal still swallows the click/hover, but nothing underneath — not even a
+-- regular window — counts as "hit".
+local function popupAt(x, y)
+  for i = #ctx.popupOrder, 1, -1 do
+    local p = ctx.popups[ctx.popupOrder[i]]
+    local win = p and p.win
+    if win and win.lastFrame and win.lastFrame >= ctx.frame - 1 then
+      if pointIn(x, y, win.x, win.y, win.w, win.h) then return p end
+      if p.kind == "modal" then return nil, true end
+    end
+  end
+  return nil, false
 end
 
 --------------------------------------------------------------------------------
@@ -438,6 +535,7 @@ function imlove.NewFrame()
   m.x, m.y = love.mouse.getPosition()
   m.pressed, ctx.pressLatch = ctx.pressLatch, false
   m.released, ctx.releaseLatch = ctx.releaseLatch, false
+  m.rightPressed, ctx.rightPressLatch = ctx.rightPressLatch, false
   local wheelDy = ctx.wheelLatch
   ctx.wheelLatch = 0
 
@@ -450,28 +548,117 @@ function imlove.NewFrame()
     ctx.resizeWindow = nil
   end
 
+  -- Prune popups whose BeginPopup()/BeginPopupModal()/BeginPopupContextItem()
+  -- stopped being called — the caller stopped submitting them, same idea as
+  -- a window whose Begin() stops being called (see windowAt()) — otherwise
+  -- a stale entry would keep io.WantCaptureMouse stuck true and every press
+  -- captured forever.
+  for i = #ctx.popupOrder, 1, -1 do
+    local p = ctx.popups[ctx.popupOrder[i]]
+    local win = p and p.win
+    if not (win and win.lastFrame and win.lastFrame >= ctx.frame - 1) then
+      table.remove(ctx.popupOrder, i)
+    end
+  end
+
   ctx.hoveredId = nil
-  ctx.hoveredWindow = windowAt(m.x, m.y)
-  if m.pressed and ctx.hoveredWindow then
+  -- Popups are hit-tested BEFORE regular windows, and a modal blocks
+  -- everything beneath it (see popupAt()).
+  local hitPopup, blocked = popupAt(m.x, m.y)
+  if hitPopup then
+    ctx.hoveredWindow = hitPopup.win
+  elseif blocked then
+    ctx.hoveredWindow = nil
+  else
+    ctx.hoveredWindow = windowAt(m.x, m.y)
+  end
+  if m.pressed and ctx.hoveredWindow and not ctx.hoveredWindow.isPopup then
     bringToFront(ctx.hoveredWindow)
   end
   if wheelDy ~= 0 and ctx.hoveredWindow then
     applyWheel(ctx.hoveredWindow, wheelDy)
   end
 
+  -- A modal dims and blocks EVERYTHING beneath it — including a title-bar
+  -- drag, a resize-grip drag, or a scrollbar drag that was already in
+  -- progress the moment it opened (none of those are hover-gated; they run
+  -- off ctx.dragWindow/ctx.resizeWindow/ctx.activeId directly, every frame,
+  -- regardless of ctx.hoveredWindow). Forcibly release those every frame a
+  -- modal is open, unless the claim belongs to the modal's own content (or
+  -- a popup opened from within it) — same idea as releaseIfActive(), just
+  -- keyed by an id-stack PREFIX since NewFrame() has no widget ids of its
+  -- own to compare against (see beginPopupContent()'s p.idPrefix).
+  local modalIdx
+  for i = 1, #ctx.popupOrder do
+    if ctx.popups[ctx.popupOrder[i]].kind == "modal" then
+      modalIdx = i
+      break
+    end
+  end
+  if modalIdx then
+    ctx.dragWindow = nil
+    ctx.resizeWindow = nil
+    if ctx.activeId then
+      local prefix = ctx.popups[ctx.popupOrder[modalIdx]].idPrefix
+      local ownedByModal = prefix
+        and ctx.activeId:sub(1, #prefix + 1) == (prefix .. "\31")
+      if not ownedByModal then ctx.activeId = nil end
+    end
+  end
+
+  -- Dismiss popups: a press — either mouse button — outside the topmost
+  -- open popup closes it, and everything stacked above whatever it DID
+  -- land on — so a press on a lower popup in a nested stack closes only
+  -- what's above that one. Modals are never dismissed this way — only
+  -- CloseCurrentPopup() closes them. The dismissing press is CONSUMED: it
+  -- must not ALSO activate whatever it just exposed underneath (a press)
+  -- or open a context menu on top of it (a right press reaching
+  -- BeginPopupContextItem()) later this same frame.
+  if (m.pressed or m.rightPressed) and #ctx.popupOrder > 0 then
+    local hitIndex, modalBlocked = nil, false
+    for i = #ctx.popupOrder, 1, -1 do
+      local id = ctx.popupOrder[i]
+      local p = ctx.popups[id]
+      local win = p.win
+      local hitWin = win and pointIn(m.x, m.y, win.x, win.y, win.w, win.h)
+      local hitOwner = p.ownerRect and pointIn(m.x, m.y, p.ownerRect.x,
+        p.ownerRect.y, p.ownerRect.w, p.ownerRect.h)
+      if hitWin or hitOwner then
+        hitIndex = i
+        break
+      end
+      if p.kind == "modal" then
+        modalBlocked = true
+        break
+      end
+    end
+    if not modalBlocked then
+      local toClose = {}
+      for i = #ctx.popupOrder, (hitIndex or 0) + 1, -1 do
+        toClose[#toClose + 1] = ctx.popupOrder[i]
+      end
+      if #toClose > 0 then
+        for i = 1, #toClose do closePopup(toClose[i]) end
+        m.pressed = false
+        m.rightPressed = false
+      end
+    end
+  end
+
   imlove.io.WantCaptureMouse = ctx.hoveredWindow ~= nil
-    or ctx.activeId ~= nil or ctx.dragWindow ~= nil
+    or ctx.activeId ~= nil or ctx.dragWindow ~= nil or #ctx.popupOrder > 0
   imlove.io.WantCaptureKeyboard = false
 end
 
 --- Draw the UI. Call at the end of love.draw so the UI lands on top of the
---- game. Plays back every window's draw list in z-order. Equivalent of
+--- game. Plays back every window's draw list in z-order, then popups (see
+--- OpenPopup()/BeginPopup()) above all of them, then the tooltip (see
+--- SetTooltip()) last of all, above even popups. Equivalent of
 --- ImGui::Render() + backend draw.
 function imlove.Render()
   if not ctx.inFrame then return end -- nothing declared this frame; no-op
   if ctx.currentWindow then
-    error("imlove.Render() called with window '" .. ctx.currentWindow.title
-      .. "' still open — missing imlove.End()", 2)
+    error("imlove.Render() called while " .. whatIsOpen(ctx.currentWindow), 2)
   end
   ctx.inFrame = false
 
@@ -486,6 +673,8 @@ function imlove.Render()
   -- inside a scrolling window can never paint outside the window's own
   -- content region either. Restored to the pre-Render() scissor (if any)
   -- when the stack empties, exactly like the color/font save-restore above.
+  -- Shared across every draw list played back below (windows, then popups,
+  -- then the tooltip) so a clip pushed by one never leaks into the next.
   local clipStack = {}
 
   local function applyTopScissor()
@@ -499,41 +688,57 @@ function imlove.Render()
     end
   end
 
-  for i = 1, #ctx.windowOrder do
-    local win = ctx.windowOrder[i]
-    if win.lastFrame == ctx.frame then
-      for j = 1, #win.drawList do
-        local c = win.drawList[j]
-        if c.kind == "clipPush" then
-          local nx, ny, nw, nh = c.x, c.y, c.w, c.h
-          local top = clipStack[#clipStack]
-          if top then
-            local x1, y1 = math.max(top.x, nx), math.max(top.y, ny)
-            local x2 = math.min(top.x + top.w, nx + nw)
-            local y2 = math.min(top.y + top.h, ny + nh)
-            nx, ny, nw, nh = x1, y1, math.max(x2 - x1, 0), math.max(y2 - y1, 0)
-          end
-          clipStack[#clipStack + 1] = { x = nx, y = ny, w = nw, h = nh }
-          applyTopScissor()
-        elseif c.kind == "clipPop" then
-          clipStack[#clipStack] = nil
-          applyTopScissor()
-        else
-          g.setColor(c.color)
-          if c.kind == "rect" then
-            g.rectangle(c.mode, c.x, c.y, c.w, c.h, c.rounding, c.rounding)
-          elseif c.kind == "text" then
-            g.print(c.text, c.x, c.y)
-          elseif c.kind == "triangle" then
-            g.polygon("fill", c.x1, c.y1, c.x2, c.y2, c.x3, c.y3)
-          elseif c.kind == "line" then
-            g.line(c.x1, c.y1, c.x2, c.y2)
-          elseif c.kind == "circle" then
-            g.circle(c.mode, c.x, c.y, c.r)
-          end
+  local function playDrawList(drawList)
+    for j = 1, #drawList do
+      local c = drawList[j]
+      if c.kind == "clipPush" then
+        local nx, ny, nw, nh = c.x, c.y, c.w, c.h
+        local top = clipStack[#clipStack]
+        if top then
+          local x1, y1 = math.max(top.x, nx), math.max(top.y, ny)
+          local x2 = math.min(top.x + top.w, nx + nw)
+          local y2 = math.min(top.y + top.h, ny + nh)
+          nx, ny, nw, nh = x1, y1, math.max(x2 - x1, 0), math.max(y2 - y1, 0)
+        end
+        clipStack[#clipStack + 1] = { x = nx, y = ny, w = nw, h = nh }
+        applyTopScissor()
+      elseif c.kind == "clipPop" then
+        clipStack[#clipStack] = nil
+        applyTopScissor()
+      else
+        g.setColor(c.color)
+        if c.kind == "rect" then
+          g.rectangle(c.mode, c.x, c.y, c.w, c.h, c.rounding, c.rounding)
+        elseif c.kind == "text" then
+          g.print(c.text, c.x, c.y)
+        elseif c.kind == "triangle" then
+          g.polygon("fill", c.x1, c.y1, c.x2, c.y2, c.x3, c.y3)
+        elseif c.kind == "line" then
+          g.line(c.x1, c.y1, c.x2, c.y2)
+        elseif c.kind == "circle" then
+          g.circle(c.mode, c.x, c.y, c.r)
         end
       end
     end
+  end
+
+  for i = 1, #ctx.windowOrder do
+    local win = ctx.windowOrder[i]
+    if win.lastFrame == ctx.frame then playDrawList(win.drawList) end
+  end
+
+  -- Overlay band: popups draw above every window, back-to-front in the same
+  -- open/nesting order as ctx.popupOrder (see OpenPopup()); the tooltip (at
+  -- most one, see SetTooltip()) draws last of all, above even popups.
+  for i = 1, #ctx.popupOrder do
+    local p = ctx.popups[ctx.popupOrder[i]]
+    if p and p.win and p.win.lastFrame == ctx.frame then
+      playDrawList(p.win.drawList)
+    end
+  end
+  local tip = ctx.tooltipWin
+  if tip and tip.lastFrame == ctx.frame then
+    playDrawList(tip.drawList)
   end
 
   if psx then g.setScissor(psx, psy, psw, psh) else g.setScissor() end
@@ -639,11 +844,8 @@ function imlove.Begin(title, open, flags)
     error("imlove.Begin() called before imlove.NewFrame()", 2)
   end
   if ctx.currentWindow then
-    local open = ctx.currentWindow
     error("imlove.Begin('" .. tostring(title) .. "') called while "
-      .. (open.isChild
-        and ("BeginChild('" .. open.idStr .. "') is open — missing imlove.EndChild()")
-        or ("window '" .. open.title .. "' is open — missing imlove.End()")), 2)
+      .. whatIsOpen(ctx.currentWindow), 2)
   end
   title = tostring(title)
   local displayTitle, idText = splitLabel(title)
@@ -904,6 +1106,12 @@ function imlove.End()
     error("imlove.End() called with BeginChild('" .. win.idStr
       .. "') still open — missing imlove.EndChild()", 2)
   end
+  if win.isPopup then
+    error("imlove.End() called with a popup still open — missing imlove.EndPopup()", 2)
+  end
+  if win.isTooltip then
+    error("imlove.End() called with a tooltip still open — missing imlove.EndTooltip()", 2)
+  end
   if #ctx.idStack > 1 then
     error("imlove.End(): " .. (#ctx.idStack - 1)
       .. " PushID()/TreeNode() left unpopped in window '" .. win.title .. "'", 2)
@@ -1134,6 +1342,332 @@ function imlove.EndChild()
   end
 
   ctx.currentWindow = parent
+end
+
+--------------------------------------------------------------------------------
+-- Popups & tooltips: a small overlay layer drawn ABOVE every window (see
+-- Render()'s overlay pass) and hit-tested BEFORE them (see NewFrame(); the
+-- bookkeeping — popupId(), popupIsOpen(), openPopupById(), closePopup(),
+-- popupAt() — lives further up, before Frame lifecycle, since NewFrame()
+-- needs it). Popups reuse the exact same window-shaped table and
+-- cursor/clip machinery as Begin() — every existing widget function works
+-- unmodified inside one — but keep their own draw list, aren't part of
+-- ctx.windowOrder, and are closed with EndPopup() instead of End(). A
+-- tooltip is the simplest overlay of all: it never accepts input, always
+-- follows the mouse, and always draws last of all (above even popups).
+--------------------------------------------------------------------------------
+
+-- Shared layout for BeginPopup()/BeginPopupModal()/BeginPopupContextItem()
+-- (and Combo()'s internal dropdown): sets up a window-shaped table exactly
+-- like Begin() does — cursor, padding, its own draw list — so every widget
+-- function works inside unmodified, but with no drag/resize/collapse, drawn
+-- into the overlay band instead of a regular window's slot, and reparented
+-- through ctx.currentWindow so nesting (a popup opened from inside another
+-- popup, or from inside a regular window/child) unwinds correctly in
+-- EndPopup(). `strId` becomes the content scope's ID-stack entry, the same
+-- convention as BeginChild()'s idStr.
+local function beginPopupContent(id, strId, kind, title)
+  local p = ctx.popups[id]
+  local win = p.win
+  if not win then
+    win = { w = 0, h = 0 }
+    p.win = win
+  end
+  win.isPopup = true
+  win.popupId = id
+  win.kind = kind
+  win.parent = ctx.currentWindow
+  win.flags = {}
+
+  ctx.currentWindow = win
+  win.idStackBase = #ctx.idStack
+  ctx.idStack[win.idStackBase + 1] = tostring(strId)
+  win.lastFrame = ctx.frame
+  -- Snapshot of the id-stack path leading INTO this popup's own content —
+  -- every widget id built while it's open has this as a prefix (including
+  -- ids in a nested popup opened from inside it). NewFrame() uses this, for
+  -- a modal, to tell "belongs to the modal" apart from "belongs to
+  -- something the modal blocks" without knowing any widget ids itself —
+  -- see the modal input-lockout there.
+  p.idPrefix = table.concat(ctx.idStack, "\31")
+
+  local hasTitleBar = kind == "modal"
+  win.titleH = hasTitleBar
+    and (ctx.font:getHeight() + style.framePadding[2] * 2) or 0
+  win.titleBarH = win.titleH
+
+  local sw, sh = love.graphics.getDimensions()
+  if kind == "modal" then
+    -- Always centered — recomputed every frame from last frame's size (the
+    -- library's usual one-frame lag), so it settles into place within a
+    -- frame or two of first appearing and stays centered as content grows.
+    win.x = (sw - (win.w or 0)) / 2
+    win.y = (sh - (win.h or 0)) / 2
+  elseif p.justOpened then
+    -- Positioned once, at the anchor openPopupById() captured, clamped to
+    -- stay fully on screen (using last known size — same one-frame lag);
+    -- unlike a modal or the tooltip, it then stays put while open.
+    win.x = clamp(p.anchorX, 0, math.max(sw - (win.w or 0), 0))
+    win.y = clamp(p.anchorY, 0, math.max(sh - (win.h or 0), 0))
+  end
+  p.justOpened = false
+
+  win.drawList = {}
+  win.childRectList = {}
+  if kind == "modal" then
+    -- Dims and blocks the rest of the screen — see NewFrame()'s hit-testing
+    -- and popupAt(): a regular window is never hovered while any modal is
+    -- open. Pushed first so it sits behind this popup's own background.
+    pushRect(win, "fill", 0, 0, sw, sh, { 0, 0, 0, 0.55 }, 0)
+  end
+  win.bgCmd = pushRect(win, "fill", win.x, win.y, 0, 0,
+    style.colors.windowBg, style.rounding)
+  if hasTitleBar then
+    win.titleCmd = pushRect(win, "fill", win.x, win.y, 0, win.titleH,
+      style.colors.titleBgActive, style.rounding)
+    pushText(win, title or strId, win.x + style.framePadding[1],
+      win.y + style.framePadding[2], style.colors.text)
+  else
+    win.titleCmd = nil
+  end
+
+  win.skipItems = false
+  win.indent = 0
+  win.innerX = win.x + style.windowPadding
+  win.nextY = win.y + win.titleBarH + style.windowPadding
+  win.lineY, win.lineH = win.nextY, 0
+  win.sameLineX = nil
+  win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0,
+    hovered = false, active = false, clicked = false }
+  win.contentMaxX = win.x
+  win.contentMaxY = win.y + win.titleBarH
+  win.clipRect = nil
+  win.hasScrollbar = false
+end
+
+-- Closes what beginPopupContent() opened: fits the popup to its content
+-- (position was already decided in beginPopupContent() — same one-frame-lag
+-- convention a resizing window uses — so it's never touched here) and
+-- restores ctx.currentWindow.
+local function endPopupContent(win)
+  local pad = style.windowPadding
+  win.w = math.max(win.contentMaxX + pad - win.x, style.minWindowWidth)
+  win.h = math.max(win.contentMaxY + pad - win.y, win.titleBarH)
+  win.bgCmd.w, win.bgCmd.h = win.w, win.h
+  if win.titleCmd then win.titleCmd.w = win.w end
+  pushRect(win, "line", win.x, win.y, win.w, win.h, style.colors.border,
+    style.rounding)
+
+  ctx.idStack[#ctx.idStack] = nil
+  ctx.currentWindow = win.parent
+end
+
+--- Set a tooltip for this frame: a small auto-fit box with no title bar,
+--- positioned just past the mouse cursor (clamped to stay on screen),
+--- drawn above absolutely everything (even open popups), and never
+--- hit-testable — hovering or clicking where it's drawn always reaches
+--- whatever is really there. Typically called right after IsItemHovered():
+---
+---   imlove.Button("Save")
+---   if imlove.IsItemHovered() then imlove.SetTooltip("writes to disk") end
+---
+--- Calling it more than once in a frame replaces the previous call — only
+--- the LAST one shows, exactly like calling BeginTooltip()/EndTooltip()
+--- yourself twice would. Equivalent of ImGui::SetTooltip().
+function imlove.SetTooltip(fmt, ...)
+  imlove.BeginTooltip()
+  imlove.Text(fmt, ...)
+  imlove.EndTooltip()
+end
+
+--- Manual form of SetTooltip(), for a tooltip with more than one widget in
+--- it. Must be paired with EndTooltip(); unlike Begin()/End(), calling this
+--- more than once in a frame is fine — each call simply replaces whatever
+--- the previous one built, "last call wins" exactly like SetTooltip().
+--- Equivalent of ImGui::BeginTooltip().
+function imlove.BeginTooltip()
+  -- Calling this again before EndTooltip() would otherwise set
+  -- win.parent = win (ctx.currentWindow IS already the tooltip), a
+  -- self-reference that EndTooltip() could never undo — every Render()
+  -- from then on, forever, would fail with "a tooltip is open" (see
+  -- whatIsOpen()), even after the caller fixes the bug, since nothing
+  -- would ever restore ctx.currentWindow to anything else. Erroring here,
+  -- before that assignment happens, keeps this the same kind of
+  -- one-frame, fix-it-and-it's-fine mistake as every other unbalanced
+  -- Begin*/End* pair in the library instead.
+  if ctx.currentWindow and ctx.currentWindow.isTooltip then
+    error("imlove.BeginTooltip() called while a tooltip is already open — "
+      .. "missing imlove.EndTooltip()", 2)
+  end
+  local win = ctx.tooltipWin
+  if not win then
+    win = { title = "##tooltip" }
+    ctx.tooltipWin = win
+  end
+  win.isTooltip = true
+  win.parent = ctx.currentWindow
+  win.flags = {}
+  ctx.currentWindow = win
+  win.idStackBase = #ctx.idStack
+  ctx.idStack[win.idStackBase + 1] = "##tooltip"
+  win.lastFrame = ctx.frame
+
+  local sw, sh = love.graphics.getDimensions()
+  win.x = clamp(ctx.mouse.x + 16, 0, math.max(sw - (win.w or 0), 0))
+  win.y = clamp(ctx.mouse.y + 16, 0, math.max(sh - (win.h or 0), 0))
+
+  win.drawList = {}
+  win.bgCmd = pushRect(win, "fill", win.x, win.y, 0, 0,
+    style.colors.windowBg, style.rounding)
+  win.titleCmd = nil
+  win.skipItems = false
+  win.indent = 0
+  win.innerX = win.x + style.windowPadding
+  win.nextY = win.y + style.windowPadding
+  win.lineY, win.lineH = win.nextY, 0
+  win.sameLineX = nil
+  win.prevItem = { x = win.innerX, y = win.nextY, w = 0, h = 0,
+    hovered = false, active = false, clicked = false }
+  win.contentMaxX, win.contentMaxY = win.x, win.y
+  win.clipRect = nil
+  win.hasScrollbar = false
+end
+
+--- Closes what BeginTooltip() opened. Equivalent of ImGui::EndTooltip().
+function imlove.EndTooltip()
+  local win = ctx.currentWindow
+  if not win or not win.isTooltip then
+    error("imlove.EndTooltip() called without a matching imlove.BeginTooltip()", 2)
+  end
+  local pad = style.windowPadding
+  win.w = math.max(win.contentMaxX + pad - win.x, style.minWindowWidth)
+  win.h = math.max(win.contentMaxY + pad - win.y, 1)
+  win.bgCmd.w, win.bgCmd.h = win.w, win.h
+  pushRect(win, "line", win.x, win.y, win.w, win.h, style.colors.border,
+    style.rounding)
+
+  ctx.idStack[#ctx.idStack] = nil
+  ctx.currentWindow = win.parent
+end
+
+--- Marks strId's popup open — resolved against the current ID stack exactly
+--- like a widget id (see BeginPopup()'s doc comment), so it's typically
+--- called right after the button/item that should open it:
+---
+---   if imlove.Button("Options") then imlove.OpenPopup("options") end
+---
+--- Equivalent of ImGui::OpenPopup().
+function imlove.OpenPopup(strId)
+  openPopupById(popupId(strId), "popup")
+end
+
+--- Begin a popup opened with OpenPopup(strId): a small floating, auto-fit,
+--- no-title-bar window, positioned where the mouse was when OpenPopup() was
+--- called (clamped to stay on screen), drawn above every regular window.
+--- Returns whether it's open; UNLIKE Begin()/End() (where you always call
+--- End()), EndPopup() must be called ONLY when this returns true — exactly
+--- Dear ImGui's convention:
+---
+---   if imlove.BeginPopup("options") then
+---     imlove.Text("...")
+---     imlove.EndPopup()
+---   end
+---
+--- strId is resolved against the current ID stack the same way OpenPopup()
+--- resolves it, so call both from the same scope (window, PushID, or
+--- enclosing popup) unless you want them to refer to different popups. A
+--- press outside the topmost open popup closes it — and everything stacked
+--- above whatever it landed on, if it landed on a lower popup in a nested
+--- stack — and that dismissing press is CONSUMED (your game never sees
+--- it), exactly like a press that lands ON a popup or widget is. Equivalent
+--- of ImGui::BeginPopup().
+function imlove.BeginPopup(strId)
+  local id = popupId(strId)
+  if not popupIsOpen(id) then return false end
+  beginPopupContent(id, strId, "popup", nil)
+  return true
+end
+
+--- Closes a popup opened with a successful BeginPopup()/BeginPopupModal()/
+--- BeginPopupContextItem() — call it ONLY when that call returned true (see
+--- BeginPopup()'s doc comment). Calling it without a matching open popup is
+--- an error, and so is leaving one open past End()/EndChild()/Render().
+--- Equivalent of ImGui::EndPopup().
+function imlove.EndPopup()
+  local win = ctx.currentWindow
+  if not win or not win.isPopup then
+    error("imlove.EndPopup() called without a matching successful "
+      .. "imlove.BeginPopup()/BeginPopupModal()/BeginPopupContextItem()", 2)
+  end
+  if #ctx.idStack ~= win.idStackBase + 1 then
+    error("imlove.EndPopup(): " .. (#ctx.idStack - win.idStackBase - 1)
+      .. " PushID()/TreeNode() left unpopped in popup", 2)
+  end
+  endPopupContent(win)
+end
+
+--- Closes whichever popup's content is currently being built — call it from
+--- inside a BeginPopup()/BeginPopupModal()/BeginPopupContextItem() block
+--- (e.g. from a "Close"/"OK" Button(), or right after a Selectable() picks
+--- an option) instead of tracking the popup's id yourself. A no-op outside
+--- a popup. Equivalent of ImGui::CloseCurrentPopup().
+function imlove.CloseCurrentPopup()
+  local win = ctx.currentWindow
+  if win and win.isPopup then
+    closePopup(win.popupId)
+  end
+end
+
+--- Opens a popup on a right-click over the most recently submitted item
+--- (its rectangle — the same one IsItemHovered() reads) — the canonical
+--- right-click context menu:
+---
+---   imlove.PushID(e.id)
+---   imlove.Selectable(e.name, false)
+---   if imlove.BeginPopupContextItem() then
+---     if imlove.Selectable("Delete") then removeEntity(e) end
+---     imlove.EndPopup()
+---   end
+---   imlove.PopID()
+---
+--- strId defaults to a fixed name scoped to the surrounding ID stack —
+--- exactly like every other widget, wrap each row in PushID()/PopID() (as
+--- you already would to give each row's own widgets distinct ids) to keep
+--- separate rows' context menus separate; pass an explicit strId if you'd
+--- rather not rely on that. Otherwise behaves exactly like BeginPopup():
+--- auto-fit, no title bar, positioned at the click, dismissed by an outside
+--- press (consumed) — pair with EndPopup() only when this returns true.
+--- Equivalent of ImGui::BeginPopupContextItem().
+function imlove.BeginPopupContextItem(strId)
+  local win = requireWindow("BeginPopupContextItem")
+  strId = strId or "##popupcontext"
+  local id = popupId(strId)
+
+  if not win.skipItems and ctx.mouse.rightPressed and win.prevItem.hovered then
+    openPopupById(id, "popup")
+  end
+
+  if not popupIsOpen(id) then return false end
+  beginPopupContent(id, strId, "popup", nil)
+  return true
+end
+
+--- Begin a modal popup opened with OpenPopup(title) (or the id portion of
+--- "Label##id"): has a title bar showing title, is always centered on
+--- screen, dims and blocks input to everything else — regular windows stop
+--- being hit-testable and io.WantCaptureMouse is unconditionally true while
+--- it's open — and, unlike BeginPopup(), an outside press does NOT dismiss
+--- it: only CloseCurrentPopup() does (wire it to your own OK/Cancel
+--- buttons). Pair with EndPopup() only when this returns true, exactly like
+--- BeginPopup(). Equivalent of ImGui::BeginPopupModal().
+function imlove.BeginPopupModal(title)
+  title = tostring(title)
+  local _, idText = splitLabel(title)
+  local id = popupId(idText)
+  if not popupIsOpen(id) then return false end
+  ctx.popups[id].kind = "modal"
+  beginPopupContent(id, idText, "modal", title)
+  return true
 end
 
 --------------------------------------------------------------------------------
@@ -1838,6 +2372,126 @@ function imlove.PlotHistogram(label, values, scaleMin, scaleMax, w, h,
     overlay)
 end
 
+--- A dropdown: shows `items[value]` (a plain array of strings) in a slider-
+--- width preview box with a small arrow, click to open a popup listing every
+--- item as a Selectable(), pick one to close it. Returns the (possibly
+--- changed) value plus a changed flag, same convention as SliderFloat:
+---
+---   quality, changed = imlove.Combo("Quality", quality, {"Low", "Medium", "High"})
+---
+--- DEVIATION from ImGui: value is a 1-based index into items (Lua
+--- convention), not a 0-based int. An out-of-range value (including 0 or
+--- nil) shows an empty preview instead of erroring — handy for "nothing
+--- selected yet". Reuses the same popup machinery as BeginPopup(); the
+--- dropdown is drawn and dismissed exactly like any other popup, it just
+--- opens and closes itself instead of requiring your own OpenPopup() call.
+--- Equivalent of ImGui::Combo().
+function imlove.Combo(label, value, items)
+  local win = requireWindow("Combo")
+  if win.skipItems then return value, false end
+  local display, idText = splitLabel(label)
+  local id = makeId(idText)
+  local fpx, fpy = style.framePadding[1], style.framePadding[2]
+  local boxW, h = style.sliderWidth, frameHeight()
+  local tw = ctx.font:getWidth(display)
+  local totalW = boxW + (tw > 0 and style.innerSpacing + tw or 0)
+  local x, y = itemAdd(win, totalW, h)
+  local hovered, held = behavior(win, id, x, y, boxW, h)
+  recordItem(win, hovered, held, false)
+
+  local popId = popupId(idText)
+  local isOpen = popupIsOpen(popId)
+  if hovered and ctx.mouse.pressed then
+    -- Press-time toggle (not release-time like most widgets): the generic
+    -- outside-press dismiss-scan in NewFrame() also runs at press-time, and
+    -- this box is registered as that popup's ownerRect, so a press here
+    -- while open is never treated as an outside/dismiss click — it reaches
+    -- here and this toggle is the only thing that closes it.
+    if isOpen then
+      closePopup(popId)
+    else
+      openPopupById(popId, "popup", { x = x, y = y, w = boxW, h = h },
+        x, y + h + 2)
+    end
+    isOpen = not isOpen
+  end
+
+  local bg = held and style.colors.frameBgActive
+    or hovered and style.colors.frameBgHovered
+    or style.colors.frameBg
+  pushRect(win, "fill", x, y, boxW, h, bg, style.rounding)
+  local preview = items and items[value]
+  if preview then
+    pushText(win, tostring(preview), x + fpx, y + fpy, style.colors.text)
+  end
+  local ax, ay = x + boxW - fpx - 4, y + h / 2
+  pushTriangle(win, ax - 4, ay - 2.5, ax + 4, ay - 2.5, ax, ay + 3,
+    style.colors.text)
+  if tw > 0 then
+    pushText(win, display, x + boxW + style.innerSpacing, y + fpy,
+      style.colors.text)
+  end
+
+  -- A pick reports changed = true unconditionally, even re-picking the
+  -- already-selected item — matching ImGui's Combo (it sets value_changed
+  -- on the click itself, not on whether the index actually moved). Only
+  -- "opened it, picked nothing, dismissed it" is changed = false.
+  local picked = false
+  if isOpen then
+    beginPopupContent(popId, idText, "popup", nil)
+    for i, item in ipairs(items or {}) do
+      imlove.PushID(i)
+      if imlove.Selectable(tostring(item), i == value) then
+        value = i
+        picked = true
+        closePopup(popId)
+      end
+      imlove.PopID()
+    end
+    endPopupContent(ctx.currentWindow)
+  end
+  return value, picked
+end
+
+--- An inline, scrollable list of items (a plain array of strings) shown as
+--- Selectable() rows in a fixed-height child region — pick one to select
+--- it. Returns the (possibly changed) value plus a changed flag, same
+--- convention as Combo():
+---
+---   choice, changed = imlove.ListBox("Level", choice, levelNames, 6)
+---
+--- DEVIATION from ImGui: value is a 1-based index into items, same as
+--- Combo(). heightInItems defaults to 7 (ImGui's default too), i.e. the
+--- box is tall enough to show that many rows before it starts scrolling.
+--- Equivalent of ImGui::ListBox().
+function imlove.ListBox(label, value, items, heightInItems)
+  local win = requireWindow("ListBox")
+  if win.skipItems then return value, false end
+  local display, idText = splitLabel(label)
+  local rowH = frameHeight()
+  local boxH = rowH * (heightInItems or 7) + style.windowPadding * 2
+
+  -- Same "changed = true on any pick, even the already-selected row" rule
+  -- as Combo() — see its comment.
+  local picked = false
+  imlove.BeginChild("##listbox_" .. idText, style.sliderWidth, boxH, true)
+  for i, item in ipairs(items or {}) do
+    imlove.PushID(i)
+    if imlove.Selectable(tostring(item), i == value) then
+      value = i
+      picked = true
+    end
+    imlove.PopID()
+  end
+  imlove.EndChild()
+
+  if #display > 0 then
+    imlove.SameLine()
+    imlove.Text("%s", display)
+  end
+  return value, picked
+end
+
 --------------------------------------------------------------------------------
 -- ID stack
 --------------------------------------------------------------------------------
@@ -1923,6 +2577,11 @@ end
 --------------------------------------------------------------------------------
 
 local function mouseOverUI(x, y)
+  -- Any open popup (including a modal) captures every press/hover on the
+  -- screen, whether or not it lands inside the popup itself: an outside
+  -- press dismisses/is blocked rather than reaching the game (see
+  -- NewFrame()'s dismiss-scan and popupAt()'s `blocked` return).
+  if #ctx.popupOrder > 0 then return true end
   return windowAt(x, y) ~= nil
     or ctx.activeId ~= nil or ctx.dragWindow ~= nil
 end
@@ -1933,6 +2592,8 @@ function imlove.mousepressed(x, y, button)
   if button == 1 then
     ctx.pressLatch = true
     ctx.mouse.down = true
+  elseif button == 2 then
+    ctx.rightPressLatch = true
   end
   imlove.io.WantCaptureMouse = captured
   return captured
@@ -1958,7 +2619,7 @@ end
 --- "NoScrollbar" windows that have nothing to scroll.
 function imlove.wheelmoved(dx, dy)
   ctx.wheelLatch = ctx.wheelLatch + dy
-  return windowAt(ctx.mouse.x, ctx.mouse.y) ~= nil
+  return #ctx.popupOrder > 0 or windowAt(ctx.mouse.x, ctx.mouse.y) ~= nil
 end
 
 --- Forward from love.keypressed. v1 has no keyboard widgets, so this never

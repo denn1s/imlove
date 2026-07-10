@@ -21,6 +21,12 @@ seven imlove windows:
   * an untitled top-right overlay — v1.2: a `"NoTitleBar", "NoMove"` FPS
                           HUD, the classic overlay-widget pattern.
 
+v1.3 additions live in the Widget gallery and Entity Inspector: a `Combo`
+and a `ListBox` sharing selection state with the tree of Selectables, a
+tooltip on hover, an "Options" button opening a `BeginPopup`, and a
+"Delete" button on the selected entity opening a `BeginPopupModal`
+confirmation.
+
 Click a circle in the world to select it, and notice that clicks on the UI
 never reach the game: mousepressed below checks imlove's return value.
 ]]
@@ -104,6 +110,7 @@ local gallery = {
   mode = "walk",
   frameTimes = {},
   showTip = true, -- v1.2: reopens the "Tip##v12" window (see tipWindow())
+  listKind = 1,   -- v1.3: ListBox() demo selection, from KINDS
 }
 
 -- A running log feeding the "Event log##v12" window's bordered BeginChild,
@@ -142,6 +149,9 @@ local function widgetGallery()
     if imlove.Button("Click me") then
       gallery.clicks = gallery.clicks + 1
     end
+    if imlove.IsItemHovered() then
+      imlove.SetTooltip("clicked %d times so far", gallery.clicks)
+    end
     imlove.SameLine()
     if imlove.SmallButton("reset") then
       gallery.clicks = 0
@@ -151,6 +161,28 @@ local function widgetGallery()
     if imlove.IsItemHovered() then
       imlove.SameLine()
       imlove.TextDisabled("(hovered)")
+    end
+
+    -- v1.3: OpenPopup()/BeginPopup() — a small floating menu, positioned at
+    -- the mouse, dismissed by clicking anywhere outside it.
+    imlove.SameLine()
+    if imlove.Button("Options") then imlove.OpenPopup("gallery-options") end
+    if imlove.BeginPopup("gallery-options") then
+      -- Each pick closes the menu itself (CloseCurrentPopup()) instead of
+      -- leaving it open until an outside click dismisses it — the usual
+      -- idiom for a one-shot action menu like this one.
+      if imlove.Selectable("Reset click counter", false) then
+        gallery.clicks = 0
+        imlove.CloseCurrentPopup()
+      end
+      if imlove.Selectable("Reset sliders", false) then
+        gallery.value = 0.5
+        gallery.sliderInt = 5
+        gallery.dragFloat = 1.0
+        gallery.dragInt = 0
+        imlove.CloseCurrentPopup()
+      end
+      imlove.EndPopup()
     end
 
     gallery.checked = imlove.Checkbox("A checkbox", gallery.checked)
@@ -202,6 +234,14 @@ local function widgetGallery()
         imlove.TreePop()
       end
       imlove.Unindent()
+
+      -- v1.3: Combo and ListBox both share `gallery.fruit`/`.listKind` with
+      -- the Selectables above — three different widgets, same 1-based
+      -- index convention, always in sync.
+      imlove.Spacing()
+      gallery.fruit = imlove.Combo("Combo (same selection)", gallery.fruit,
+        gallery.fruits)
+      gallery.listKind = imlove.ListBox("ListBox", gallery.listKind, KINDS, 3)
     end
 
     imlove.Separator()
@@ -237,6 +277,23 @@ local function entityInspector()
       if imlove.Button("Deselect") then
         logEvent("deselected %s", selected.name)
         selected = nil
+      end
+      imlove.SameLine()
+      -- v1.3: BeginPopupModal() — dims and blocks the rest of the UI (and
+      -- the game world behind it) until the player picks Delete or Cancel;
+      -- unlike BeginPopup(), clicking outside it does nothing.
+      if imlove.Button("Delete") then imlove.OpenPopup("Delete entity?") end
+      if imlove.BeginPopupModal("Delete entity?") then
+        imlove.Text("Delete %s? This can't be undone.", selected.name)
+        if imlove.Button("Delete##confirm") then
+          logEvent("deleted %s", selected.name)
+          selected.alive = false
+          selected = nil
+          imlove.CloseCurrentPopup()
+        end
+        imlove.SameLine()
+        if imlove.Button("Cancel") then imlove.CloseCurrentPopup() end
+        imlove.EndPopup()
       end
     else
       imlove.Text("Select an entity above, or\nclick a circle in the world.")

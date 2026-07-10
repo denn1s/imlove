@@ -28,7 +28,7 @@ the UI consumed the event (= your game should ignore it).
 
 | Flag | Meaning |
 |---|---|
-| `imlove.io.WantCaptureMouse` | After `NewFrame()`: the mouse is over/held by the UI this frame. |
+| `imlove.io.WantCaptureMouse` | After `NewFrame()`: the mouse is over/held by the UI this frame. Unconditionally `true` whenever any popup or modal is open, regardless of mouse position. A tooltip does **not** force this — like ImGui's, it's purely visual and never hit-testable, so showing one has no effect on input capture. |
 | `imlove.io.WantCaptureKeyboard` | Always `false` in v1. |
 
 ### Windows
@@ -92,6 +92,27 @@ A window auto-fits its content, exactly like v1.1, until it's given an explicit 
 | `imlove.SameLine(offsetFromStartX, spacing)` | — | Place the next widget on the same row as the previous one. With no arguments: right after the previous item plus one item spacing (v1 behavior, unchanged). `offsetFromStartX`, if non-zero, places it at that x offset from the window's content start instead. `spacing`, if given, overrides the default gap. |
 | `imlove.PlotLines(label, values, scaleMin, scaleMax, w, h, overlay)` | — | A line-graph plot of `values` (a plain Lua array of numbers) — the canonical "FPS over time" widget. `scaleMin`/`scaleMax` default to the min/max found in `values`. `w`/`h` default to the slider width and three line-heights. `overlay`, if given, is centered on the plot instead of the label. |
 | `imlove.PlotHistogram(label, values, scaleMin, scaleMax, w, h, overlay)` | — | Same signature and semantics as `PlotLines`, drawn as vertical bars instead of a connected line. |
+| `imlove.Combo(label, value, items)` | `value, changed` | A slider-width preview box + arrow; click to open a dropdown of `Selectable`s built from `items` (a plain Lua array — its element order is the display order). **`value` is a 1-based index into `items`**, not a 0-based one — this is a deliberate deviation from ImGui, matching Lua's own array convention; assign the first return back. An out-of-range `value` (including `0` or `nil`) just shows an empty preview instead of erroring. |
+| `imlove.ListBox(label, value, items, heightInItems)` | `value, changed` | An always-visible, scrollable list of `Selectable`s (a thin wrapper over `BeginChild`) — the alternative to `Combo` when you want every option visible without a click. Same 1-based `value` convention as `Combo`. `heightInItems` defaults to `7` visible rows; extra items scroll. |
+
+### Popups & tooltips
+
+Popups and modals draw in their own overlay layer, above every regular
+window, and are hit-tested before them too — nothing you build in a normal
+window can ever occlude or steal a click from one. Tooltips draw above even
+that (see `SetTooltip()`), but are never hit-tested at all — they're purely
+visual and never capture input.
+
+| Function | Returns | Description |
+|---|---|---|
+| `imlove.SetTooltip(fmt, ...)` | — | A small auto-fit box with no title bar, positioned just past the mouse (clamped to stay on screen), that follows the mouse and is drawn above absolutely everything — including any open popup. Never hit-testable: hovering or clicking where it's drawn always reaches whatever is really underneath. Call it every frame you want it shown, typically right after `IsItemHovered()`. Calling it more than once in a frame replaces the previous call — only the last one shows. |
+| `imlove.BeginTooltip()` / `imlove.EndTooltip()` | — | The manual form of `SetTooltip()`, for a tooltip with more than one widget in it. Must be paired with `EndTooltip()`; like `SetTooltip()`, calling this more than once in a frame is fine — "last call wins". |
+| `imlove.OpenPopup(strId)` | — | Marks `strId`'s popup open. `strId` is resolved against the current ID stack exactly like a widget id, so call it from the same scope (window, `PushID`, or enclosing popup) as the matching `BeginPopup(strId)`. Typically called right after the button/item that should open it. |
+| `imlove.BeginPopup(strId)` | `open` | Begin a popup opened with `OpenPopup(strId)`: a small floating, auto-fit, no-title-bar window, positioned where the mouse was when `OpenPopup()` was called (clamped to stay on screen). **Unlike `Begin()`/`End()`, call `EndPopup()` only when this returns `true`** — do not call it unconditionally. A press outside the topmost open popup closes it (and everything stacked above whatever it landed on, for nested popups) and that dismissing press is consumed — your game never sees it. |
+| `imlove.EndPopup()` | — | Closes what a successful `BeginPopup()`/`BeginPopupModal()`/`BeginPopupContextItem()` opened. Calling it without a matching open popup is an `error()`, and so is leaving one open past `End()`/`EndChild()`/`Render()`. |
+| `imlove.CloseCurrentPopup()` | — | Closes whichever popup's content is currently being built. Call it from inside a `BeginPopup()`/`BeginPopupModal()`/`BeginPopupContextItem()` block (e.g. a "Close"/"OK" `Button()`, or right after a `Selectable()` picks an option). A no-op outside a popup. |
+| `imlove.BeginPopupContextItem(strId)` | `open` | Opens a popup on a right-click over the most recently submitted item (its rectangle — the same one `IsItemHovered()` reads) — the canonical right-click context menu. `strId` defaults to a fixed name scoped to the surrounding ID stack; wrap each row in `PushID()`/`PopID()` to keep separate rows' context menus independent, or pass an explicit `strId`. Otherwise behaves exactly like `BeginPopup()`. |
+| `imlove.BeginPopupModal(title)` | `open` | Begin a modal popup opened with `OpenPopup(title)` (or the id portion of `"Label##id"`): has a title bar showing `title`, is always centered on screen, and dims + blocks input to everything else — regular windows stop being hit-testable and `io.WantCaptureMouse` is unconditionally `true` while it's open. Unlike `BeginPopup()`, an outside press does **not** dismiss it — only `CloseCurrentPopup()` does (wire it to your own OK/Cancel buttons). Pair with `EndPopup()` only when this returns `true`. |
 
 ### ID stack
 

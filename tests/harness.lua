@@ -13,6 +13,7 @@ function H.fresh()
   H.stub.install()
   H.stub.clearCalls()
   H.stub.setMouse(0, 0)
+  H.stub.setScreenSize(800, 600)
   package.loaded["imlove"] = nil
   H.im = require "imlove"
   return H.im
@@ -42,6 +43,41 @@ end
 function H.wheel(dx, dy, ui)
   H.im.wheelmoved(dx, dy)
   H.frame(ui)
+end
+
+-- A full right-click at (x, y): press + one frame, release + one frame —
+-- same interleaving as H.click, button 2 instead of button 1. Right-clicks
+-- are a one-frame latch (see ctx.rightPressLatch), consumed on the press
+-- frame, so most tests only need the first frame; the release is still
+-- forwarded for completeness/symmetry with a real event stream.
+function H.rightClick(x, y, ui)
+  H.stub.setMouse(x, y)
+  H.im.mousepressed(x, y, 2)
+  H.frame(ui)
+  H.im.mousereleased(x, y, 2)
+  H.frame(ui)
+end
+
+-- Generic single event + frame, for tests that need to interleave presses/
+-- releases/frames in an order H.click()/H.rightClick() don't cover (e.g. a
+-- press over one popup while another is open). Returns whatever
+-- mousepressed()/mousereleased() returned (was the event consumed), same as
+-- calling them directly would — but, critically, also moves the stub's
+-- tracked mouse position to (x, y) first: a real LÖVE event's x/y always
+-- matches love.mouse.getPosition() by the time NewFrame() polls it, and
+-- skipping this step is a common way to accidentally test the wrong point.
+function H.press(x, y, button, ui)
+  H.stub.setMouse(x, y)
+  local consumed = H.im.mousepressed(x, y, button or 1)
+  H.frame(ui)
+  return consumed
+end
+
+function H.release(x, y, button, ui)
+  H.stub.setMouse(x, y)
+  local consumed = H.im.mousereleased(x, y, button or 1)
+  H.frame(ui)
+  return consumed
 end
 
 -- Capture the last widget's rectangle into r as x1/y1/x2/y2.

@@ -19,6 +19,7 @@ local files = {
   "test_windows",
   "test_windows_v12",
   "test_capture",
+  "test_popups",
 }
 
 local pass, fail = 0, 0
