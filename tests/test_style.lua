@@ -1,6 +1,7 @@
 --[[
 v1.5: style & polish — PushStyleColor/PopStyleColor, PushStyleVar/
 PopStyleVar, GetStyle, PushFont/PopFont, ColorEdit3/ColorEdit4.
+Plus v1.6's io.FontDefault (the same font machinery, so it lives here).
 
 Known stub geometry (see stub_love.lua and the style table):
   font: 7px/char wide, 14px tall     windowPadding = 8
@@ -534,6 +535,72 @@ return function(T, H)
     im.End()
     local ok3 = pcall(im.Render)
     assert(ok3, "a rejected PushFont() must leave no stray fontStack entry")
+  end)
+
+  --------------------------------------------------------------------------
+  -- io.FontDefault (v1.6)
+  --------------------------------------------------------------------------
+
+  T("io.FontDefault replaces the default font for measuring and drawing; "
+    .. "clearing it back to nil restores the built-in", function()
+    local im = H.fresh()
+    im.io.FontDefault = bigFont
+    local rect = {}
+    local function ui()
+      im.Begin("W")
+      im.Text("Hi") -- 2 chars: 28px at 14px/char, vs 14px at the stub's 7
+      H.grabRect(rect, im)
+      im.End()
+    end
+    H.frame(ui)
+    assert(rect.x2 - rect.x1 == 28 and rect.y2 - rect.y1 == 28,
+      "io.FontDefault must drive layout for every widget")
+    local drewWithBig = false
+    for _, c in ipairs(H.stub.calls) do
+      if c[1] == "setFont" and c[2] == bigFont then drewWithBig = true end
+    end
+    assert(drewWithBig, "Render() must hand io.FontDefault to setFont()")
+
+    -- Cleared: the very next frame is back on the built-in stub font.
+    im.io.FontDefault = nil
+    H.frame(ui)
+    assert(rect.x2 - rect.x1 == 14 and rect.y2 - rect.y1 == 14,
+      "nil must restore the library's own font")
+  end)
+
+  T("io.FontDefault: PushFont/PopFont still layer on top of it", function()
+    local im = H.fresh()
+    im.io.FontDefault = bigFont
+    local rectBase, rectPushed = {}, {}
+    local function ui()
+      im.Begin("W")
+      im.Text("Hi")
+      H.grabRect(rectBase, im)
+      im.PushFont(H.stub.font)
+      im.Text("Hi")
+      H.grabRect(rectPushed, im)
+      im.PopFont()
+      im.End()
+    end
+    H.frame(ui)
+    assert(rectBase.x2 - rectBase.x1 == 28)
+    assert(rectPushed.x2 - rectPushed.x1 == 14,
+      "an explicit PushFont must win over io.FontDefault for its span")
+  end)
+
+  T("a non-Font io.FontDefault errors at NewFrame(), naming the field — "
+    .. "not frames later inside textSize()", function()
+    local im = H.fresh()
+    im.io.FontDefault = 42
+    local ok, err = pcall(im.NewFrame)
+    assert(not ok and err:find("FontDefault"), tostring(err))
+    -- Recover: clear it and the library must be usable again.
+    im.io.FontDefault = nil
+    im.NewFrame()
+    im.Begin("W")
+    im.Button("ok")
+    im.End()
+    im.Render()
   end)
 
 end

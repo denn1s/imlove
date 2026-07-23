@@ -7,6 +7,94 @@ fixes, never breaking changes.
 
 ## Unreleased
 
+## [1.6.0] - 2026-07-23
+
+Window snapping — a window can be pinned to the left or right screen edge as
+a full-height side panel, by gesture or from code. Deliberately edge
+*snapping*, not docking: no dock areas, no tabs, no splitters — those stay on
+the non-goals list (see ROADMAP.md, updated to say exactly that). Also ships
+`io.FontDefault` (symbol-capable fonts for debug buttons) and a fix for a
+v1.2-era collapse drawing bug. Beyond that fix, nothing renders or behaves
+differently unless a window is snapped or a font is assigned.
+
+### Added
+
+- **The snap gesture** — drag any window's title bar until the *mouse* is
+  within `GetStyle().snapZone` (default 12) pixels of the left or right
+  screen edge and release: the window snaps there. Only the release snaps —
+  merely passing through the zone mid-drag does nothing. The trigger is the
+  mouse position, not the window's own edge, so grabbing a wide window by
+  the middle of its title bar doesn't snap it the moment its edge grazes
+  x = 0. While the mouse is inside a zone mid-drag, a translucent
+  full-height band previews where the window will pin — drawn under every
+  window in `Render()`, so the dragged window floats above its own
+  preview; it costs one rectangle, and only on those frames. While
+  snapped: pinned to the edge at `y = 0`, height re-derived
+  from the screen every frame (an OS window resize is tracked for free),
+  width frozen at whatever it was when it snapped, no resize grip, and no
+  collapse arrow — the glyph is hidden outright and the title slides into
+  its place, since an inert arrow on a pinned panel would read as a broken
+  button. The title bar still drags: once the mouse is outside the edge
+  zone AND has pulled more than `snapZone` pixels from where it grabbed,
+  the window unsnaps immediately (restoring its pre-snap height and sizing
+  mode, keeping its width) mid-drag, no release needed — the distance
+  check is what keeps a plain click or sloppy wiggle on a docked title bar
+  from undocking it. Dragging a snapped-left window straight to the right
+  zone switches sides in one gesture, and snapping a collapsed window
+  opens it (re-measuring an auto-fit window's width from its un-collapsed
+  content, not the title-only sliver it had while collapsed).
+- `imlove.SetNextWindowSnap(side, cond)` — the programmatic way in (and
+  out): `"left"`/`"right"`, or `nil` to release. `cond` follows
+  `SetNextWindowPos()`'s convention: `"once"` seeds a window snapped the
+  first time it's ever created (drag-to-unsnap is then for keeps), the
+  default `"always"` re-asserts every frame — a dragged-free window springs
+  back on release; combine with the `"NoMove"` flag for a truly static side
+  panel. Ignored by `"AlwaysAutoResize"` windows, exactly like
+  `SetNextWindowSize()` (a full-height pin and "always fit content" are
+  opposite claims). An invalid side is an `error()`, the usual typo
+  protection. A brand-new never-laid-out window that starts snapped runs
+  its first frame auto-fit to discover its width, then pins — the same
+  one-frame lag the rest of the library leans on.
+- `imlove.GetWindowSnap()` — `"left"`, `"right"`, or `nil` for the current
+  window. The read-back half of the gesture: the user may have snapped or
+  freed the window themselves since your code last set it (the demo's
+  radio buttons stay honest this way).
+- `GetStyle().snapZone` — the edge-zone width in pixels, also pushable via
+  `PushStyleVar("snapZone", ...)`.
+- Ini persistence: a snapped window writes a `Snap=left`/`Snap=right` line,
+  and its `Size=` line carries its *pre-snap* height instead of the pinned
+  screen height, so unsnapping after a restart still restores it (a window
+  that was auto-fit before snapping writes no `Size=` line at all,
+  mirroring live behavior). A loaded `Snap=` entry beats a `"once"`
+  `SetNextWindowSnap()`, the same precedence Pos/Size already follow.
+- Demo: the "Windows" section grew free/snap-left/snap-right radios for the
+  secondary window, wired through `GetWindowSnap()` so drag-snapping the
+  window moves the radio dot too.
+- `imlove.io.FontDefault` — the default font for every widget, mirroring
+  ImGui's `io.FontDefault`: `nil` (the default) keeps the library's own
+  lazily-created 13px font; assign any LÖVE `Font` to replace it. The
+  motivating case is symbol glyphs the built-in font lacks (▶/⏸/⏭ on
+  play/pause/step debug buttons): build a base font, `Font:setFallbacks()`
+  a symbol font onto it — LÖVE's native answer to ImGui's font-merging
+  machinery — and assign the result. Re-read AND validated every
+  `NewFrame()` (before any frame state is touched, so a bogus assignment
+  errors loudly, names the field, and is fully recoverable by fixing it),
+  clearable back to `nil` at any time; `PushFont()`/`PopFont()` still layer
+  on top. Deliberately not a bundled symbol font — imlove stays one pure-Lua
+  file with no assets; the font (and not `release()`-ing it while the UI
+  uses it) is the host's.
+
+### Fixed
+
+- A collapsed **fixed-size** window now draws only its title bar. Since the
+  v1.2 sizing model it kept painting its full-size background, border, and
+  resize grip while collapsed — only the content disappeared — because
+  `win.h` must keep holding the size to restore on un-collapse and the
+  chrome was drawn straight from it (auto-fit windows shrank `win.h` itself,
+  which is why collapse looked right on them and on every pre-v1.2 window).
+  Hit-testing always agreed with the title-bar-only shape, so this was
+  purely visual. Surfaced while exercising snapping, present since v1.2.
+
 ## [1.5.0] - 2026-07-10
 
 Style & polish — the final v1 roadmap release. imlove's one built-in theme

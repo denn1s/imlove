@@ -34,6 +34,7 @@ the UI consumed the event (= your game should ignore it).
 |---|---|
 | `imlove.io.WantCaptureMouse` | After `NewFrame()`: the mouse is over/held by the UI this frame. Unconditionally `true` whenever any popup or modal is open, regardless of mouse position. A tooltip does **not** force this — like ImGui's, it's purely visual and never hit-testable, so showing one has no effect on input capture. |
 | `imlove.io.WantCaptureKeyboard` | After `NewFrame()`: `true` while an `InputText`/`InputFloat`/`InputInt` — or a ctrl-clicked `SliderFloat`/`SliderInt`/`DragFloat`/`DragInt` — holds keyboard focus. `false` whenever nothing does, exactly as in v1-v1.3. |
+| `imlove.io.FontDefault` | The default font for every widget, mirroring ImGui's `io.FontDefault`. `nil` (the default) means the library's own lazily-created 13px LÖVE font. Assign any LÖVE `Font` to replace it — the usual reason being symbol glyphs the built-in font lacks (▶, ⏸, ⏭ on debug buttons), via LÖVE's own `Font:setFallbacks`: create a base font, `setFallbacks` a symbol font onto it, and assign it here. Re-read (and validated) every `NewFrame()`, so it can be set or cleared at any time; `PushFont`/`PopFont` layer on top of it. The font is yours — don't `release()` it while the UI is using it. |
 
 ### Windows
 
@@ -43,8 +44,10 @@ the UI consumed the event (= your game should ignore it).
 | `imlove.End()` | — | Close the current window. Exactly one per `Begin`, collapsed or not. |
 | `imlove.SetNextWindowPos(x, y, cond)` | — | Position the next `Begin`. `cond` is `"always"` (default) or `"once"` (only when the window is first created — use this for default layouts the user can still drag around). |
 | `imlove.SetNextWindowSize(w, h, cond)` | — | Size the next `Begin` explicitly, taking it out of auto-fit mode: from then on the window keeps this size and overflowing content scrolls instead of growing it (see "Sizing model" below). `cond` is `"always"` (default) or `"once"`. Ignored by a window with the `"AlwaysAutoResize"` flag. |
+| `imlove.SetNextWindowSnap(side, cond)` | — | Snap the next `Begin` to a screen edge: `side` is `"left"` or `"right"` — or `nil`, releasing a previous snap (see "Snapping" below). `cond` is `"always"` (default) or `"once"`, with the same meanings as `SetNextWindowPos`. Ignored by a window with the `"AlwaysAutoResize"` flag. |
 | `imlove.GetWindowPos()` | `x, y` | Current window's position. |
 | `imlove.GetWindowSize()` | `w, h` | Current window's size as of last frame (windows size themselves to their content at `End`, unless explicitly sized — see below). |
+| `imlove.GetWindowSnap()` | `side` | Which edge the current window is snapped to: `"left"`, `"right"`, or `nil`. The programmatic counterpart to the drag gestures — the user may have snapped or freed the window themselves since your code last set it. |
 | `imlove.BeginChild(idStr, w, h, border)` | `visible` | Begin a scrollable child region embedded at the cursor in the current window (or child): its own cursor, scroll position, and ID scope (pushes `idStr`), but no separate z-order — it draws into its root window's draw list. `w`/`h` &le; 0 mean, respectively, "remaining width" and a 200px default. `border`, if truthy, draws a border line around it. Must be matched by `EndChild()`; returns `false` only when an ancestor window/child is collapsed or otherwise skipping. |
 | `imlove.EndChild()` | — | Close the current `BeginChild()` region. Exactly one per `BeginChild()` — `End()` errors if you forget it, and vice versa. |
 
@@ -64,6 +67,17 @@ Passed to `Begin()` as a bare string or an array of strings, e.g. `imlove.Begin(
 #### Sizing model
 
 A window auto-fits its content, exactly like v1.1, until it's given an explicit size — via `SetNextWindowSize()` or by the user dragging its resize grip. From that point on its size is sticky: it no longer grows or shrinks to fit content, and content taller than the window scrolls (by mouse wheel, or by dragging the scrollbar that appears automatically once content overflows). `"AlwaysAutoResize"` opts a window out of this permanently. `BeginChild()` regions are always fixed-size and scrollable — there's no auto-fit mode for a child.
+
+#### Snapping
+
+A **snapped** window (v1.6) is pinned to the left or right screen edge as a full-height side panel: `x`/`y` locked to the edge, height re-derived from the screen every frame (so an OS window resize is tracked for free), and only its width — the width it had the moment it snapped — stays its own. While snapped it has no collapse arrow and no resize grip, but its title bar still drags.
+
+Two ways in, two ways out:
+
+- **Gesture** — drag any window's title bar until the *mouse* is within `GetStyle().snapZone` (default 12) pixels of the left or right screen edge and release: it snaps there. While the mouse is inside a zone, a translucent full-height band (drawn under every window) previews where the window will pin; merely passing through the zone mid-drag does nothing until you release. Drag a snapped window's title bar away — once the mouse is outside the zone *and* has pulled more than `snapZone` pixels from where it grabbed, the window unsnaps immediately (restoring its pre-snap height, keeping its current width) and follows the drag. A plain click or sloppy wiggle on a snapped title bar leaves it snapped.
+- **API** — `SetNextWindowSnap("left"/"right")` before `Begin()`, or `SetNextWindowSnap(nil)` to release. `cond = "once"` seeds a default the user can drag away for keeps; the default `"always"` re-asserts every frame, so a dragged-free window springs back on release — combine with the `"NoMove"` flag for a truly static side panel.
+
+Snap state persists in the ini alongside position/size/collapsed (see "Settings persistence" below). This is deliberately edge *snapping*, not docking: no dock areas, no tabs, no splitters (see ROADMAP.md's non-goals).
 
 ### Widgets
 
@@ -181,7 +195,7 @@ margin and auto-fit size were already locked in.
 |---|---|---|
 | `imlove.PushStyleColor(name, color)` | — | Push a `{r, g, b, a}` override for `GetStyle().colors[name]` — e.g. `"button"`, `"text"`, `"frameBg"`. An unknown `name` is an `error()`. |
 | `imlove.PopStyleColor(count)` | — | Pop `count` (default `1`) color overrides, restoring each one. |
-| `imlove.PushStyleVar(name, value)` | — | Push an override for one of `GetStyle()`'s scalar/pair fields: a plain number for `windowPadding`, `innerSpacing`, `indent`, `rounding`, `sliderWidth`, `grabWidth`; a `{x, y}` table for `framePadding`/`itemSpacing`. An unknown `name`, or a `value` of the wrong shape, is an `error()`. |
+| `imlove.PushStyleVar(name, value)` | — | Push an override for one of `GetStyle()`'s scalar/pair fields: a plain number for `windowPadding`, `innerSpacing`, `indent`, `rounding`, `sliderWidth`, `grabWidth`, `snapZone`; a `{x, y}` table for `framePadding`/`itemSpacing`. An unknown `name`, or a `value` of the wrong shape, is an `error()`. |
 | `imlove.PopStyleVar(count)` | — | Pop `count` (default `1`) style var overrides, restoring each one. |
 | `imlove.GetStyle()` | `style` | The live style table (scalar fields at the top level, a `colors` sub-table underneath) — the same one every widget reads from. Mutating it directly takes effect immediately and is **not** caught by `Render()`'s balance check if you forget to undo it; reach for this only for a one-time theme setup (e.g. right after `require "imlove"`), and use `PushStyleColor`/`PushStyleVar` for anything scoped to part of a frame. |
 | `imlove.ColorEdit3(label, color)` | `color, changed` | The 3-channel (`{r, g, b}`) version of `ColorEdit4` below — same swatch + popup, only R/G/B sliders. A 4th channel on the table passed in, if any, always passes through untouched (never edited, never dropped). |
@@ -194,8 +208,11 @@ margin and auto-fit size were already locked in.
 Mirrors Dear ImGui's `imgui.ini`: each window's position, collapsed state,
 and — only if it was ever explicitly sized — its size, survive across runs,
 keyed by window title, in a small ImGui-ini-flavored text file written via
-`love.filesystem`. Popups, tooltips, children, and the open/closed
-(close-button) state are never persisted.
+`love.filesystem`. A snapped window (see "Snapping" above) also persists a
+`Snap=` line, and its `Size=` line carries its *pre-snap* height rather than
+the pinned screen height, so unsnapping after a restart still restores it.
+Popups, tooltips, children, and the open/closed (close-button) state are
+never persisted.
 
 | Flag / Function | Description |
 |---|---|
@@ -207,4 +224,5 @@ A loaded position/size beats a window's cascading default placement, and
 beats a `SetNextWindowPos()`/`SetNextWindowSize()` whose `cond` is `"once"`
 (the ini entry already counts as "the window has been placed once"); an
 explicit `"always"` still wins over the ini, every frame, same as it wins
-over a `"once"` call.
+over a `"once"` call. A loaded `Snap=` entry follows the same rule against
+`SetNextWindowSnap()`.

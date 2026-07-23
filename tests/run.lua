@@ -18,6 +18,7 @@ local files = {
   "test_ids",
   "test_windows",
   "test_windows_v12",
+  "test_snap",
   "test_capture",
   "test_popups",
   "test_settings",

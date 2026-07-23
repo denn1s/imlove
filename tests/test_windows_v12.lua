@@ -793,4 +793,53 @@ return function(T, H)
       "cancelled out and content under-scrolled by one windowPadding)")
   end)
 
+  T("REGRESSION: a collapsed FIXED-SIZE window draws only its title bar — "
+    .. "not its full-size background, border, and resize grip", function()
+    local im = H.fresh()
+    local pos = {}
+    local function ui()
+      im.SetNextWindowSize(300, 200, "once")
+      im.Begin("F")
+      pos.x, pos.y = im.GetWindowPos()
+      im.Text("content")
+      im.End()
+    end
+    H.frame(ui)
+    H.frame(ui)
+
+    -- Collapse via the arrow, then inspect one frame's draw calls. (The
+    -- pre-fix bug: auto-fit windows shrank win.h itself on collapse, but a
+    -- fixed window's win.h must keep holding the size to restore — and the
+    -- background/border/grip were drawn straight from it.)
+    H.click(pos.x + 10, pos.y + 10, ui)
+    H.stub.clearCalls()
+    H.frame(ui)
+    local polygons, deepRects = 0, 0
+    for _, c in ipairs(H.stub.calls) do
+      if c[1] == "polygon" then polygons = polygons + 1 end
+      if (c[1] == "rectangle") and c[6] and c[6] > 20 then
+        deepRects = deepRects + 1
+      end
+    end
+    assert(deepRects == 0,
+      "nothing taller than the 20px title bar may draw while collapsed, "
+      .. "got " .. deepRects .. " rect(s)")
+    assert(polygons == 1,
+      "only the collapse arrow may draw while collapsed (no grip), got "
+      .. polygons .. " polygon(s)")
+
+    -- Un-collapse: the full 300x200 background comes back.
+    H.click(pos.x + 10, pos.y + 10, ui)
+    H.stub.clearCalls()
+    H.frame(ui)
+    local fullBg = false
+    for _, c in ipairs(H.stub.calls) do
+      if c[1] == "rectangle" and c[2] == "fill"
+          and c[5] == 300 and c[6] == 200 then
+        fullBg = true
+      end
+    end
+    assert(fullBg, "un-collapsing must restore the full-size background")
+  end)
+
 end

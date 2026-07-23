@@ -105,5 +105,7 @@ Not gated on any subsystem; land whenever they're ready:
 ## Continued non-goals
 
 To keep the one-file, pure-Lua promise honest, these stay out of scope:
-docking, multi-viewport, gamepad/keyboard navigation, DPI scaling, custom
-draw callbacks, touch input.
+docking (edge *snapping* — pinning a window to the left/right screen edge as
+a full-height side panel — shipped in v1.6 as `SetNextWindowSnap()`; dock
+areas, tabs, and splitters remain out), multi-viewport, gamepad/keyboard
+navigation, DPI scaling, custom draw callbacks, touch input.
