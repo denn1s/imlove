@@ -62,6 +62,27 @@ imlove.End()  -- ALWAYS call End, even when Begin returned false
 
 Windows are draggable by their title bar, collapsible via the arrow, and
 remember their position and collapsed state across frames, keyed by title.
+Drag one to the left or right screen edge and it snaps there as a full-height
+side panel (drag it away to free it, or pin one from code with
+`SetNextWindowSnap` — see [docs/api.md](docs/api.md#snapping)).
+
+### Symbols on buttons (▶ ⏸ ⏭)
+
+The UI's built-in 13px font has no symbol glyphs. For play/pause/step-style
+debug buttons, build a font with LÖVE's own fallback mechanism and hand it
+to imlove as the default (mirrors ImGui's `io.FontDefault`):
+
+```lua
+local ui = love.graphics.newFont(13)
+ui:setFallbacks(love.graphics.newFont("NotoSansSymbols2-Regular.ttf", 13))
+imlove.io.FontDefault = ui
+
+-- later, in any window:
+if imlove.Button("▶##play") then game:resume() end
+```
+
+Set it back to `nil` any time to return to the built-in font. `PushFont`/
+`PopFont` still work on top for one-off spans.
 
 ### Letting the game and the UI share the mouse
 

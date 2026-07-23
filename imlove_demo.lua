@@ -77,6 +77,12 @@ local demo = {
   secNoTitleBar = false,
   secNoResize = false,
   secAlwaysAutoResize = false,
+  secSnap = "none",     -- the secondary window's LIVE snap state, read back
+                        -- via GetWindowSnap() each frame so the radios stay
+                        -- honest when the user drags the window onto (or
+                        -- off) an edge themselves
+  secSnapPending = nil, -- a radio pick, applied via SetNextWindowSnap()
+                        -- right before the secondary window's next Begin()
 
   -- "Text input"
   textValue = "edit me",
@@ -421,6 +427,25 @@ local function showWindows()
     imlove.SameLine()
     demo.secAlwaysAutoResize = imlove.Checkbox("AlwaysAutoResize",
       demo.secAlwaysAutoResize)
+
+    imlove.Separator()
+    imlove.TextDisabled("Snapping: pin it to a screen edge at full height " ..
+      "-- or drag its title bar to an edge yourself. Drag it away to " ..
+      "unsnap. (Ignored while AlwaysAutoResize is on.)")
+    -- The radios reflect demo.secSnap, which showSecondaryWindow() reads
+    -- back from GetWindowSnap() every frame -- so a drag-snap or drag-away
+    -- performed on the window itself moves the dot here too.
+    if imlove.RadioButton("free##secSnap", demo.secSnap == "none") then
+      demo.secSnapPending = "none"
+    end
+    imlove.SameLine()
+    if imlove.RadioButton("snap left##secSnap", demo.secSnap == "left") then
+      demo.secSnapPending = "left"
+    end
+    imlove.SameLine()
+    if imlove.RadioButton("snap right##secSnap", demo.secSnap == "right") then
+      demo.secSnapPending = "right"
+    end
   end
 end
 
@@ -441,11 +466,26 @@ local function showSecondaryWindow()
   if not demo.secAlwaysAutoResize then
     imlove.SetNextWindowSize(220, 120, "once")
   end
+  if demo.secSnapPending then
+    -- A radio was picked in showWindows() this frame (or last): apply it
+    -- once, right before this window's Begin(). "none" maps to nil,
+    -- releasing the snap.
+    imlove.SetNextWindowSnap(
+      demo.secSnapPending ~= "none" and demo.secSnapPending or nil)
+    demo.secSnapPending = nil
+  end
   local notCollapsed, open = imlove.Begin(
     "imlove Demo: Secondary##imlove_demo", demo.secondaryOpen, flags)
+  -- Read the LIVE snap state back (the user may have dragged the window
+  -- onto or off an edge) so next frame's radios show the truth.
+  demo.secSnap = imlove.GetWindowSnap() or "none"
   if notCollapsed then
     imlove.TextWrapped("Close me with the X, or uncheck the box in " ..
       "the main demo window.")
+    if imlove.GetWindowSnap() then
+      imlove.TextWrapped("Snapped! Drag my title bar away from the edge " ..
+        "to set me free.")
+    end
   end
   imlove.End()
   demo.secondaryOpen = open
